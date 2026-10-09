@@ -10,7 +10,8 @@ import {
   users,
 } from '@telrad/db';
 import { LINK_STATES, hashToken, newToken, verifyPassword, type LinkState } from '@telrad/shared';
-import express, { type Express, type NextFunction, type Request, type Response, type Router } from 'express';
+import express, { type Express, type Router } from 'express';
+import { ah, errorHandler } from './handler.js';
 import { COOKIE, readCookie, requireAuth, scopeTenant, type Ctx } from './auth.js';
 import { clinicalRouter } from './routes/clinical.js';
 import { orphansRouter } from './routes/orphans.js';
@@ -56,7 +57,7 @@ export function createApp(deps: AppDeps): Express {
 
   // Readiness answers "is it well", not "what is behind it": no provider name, no
   // path, no credential echo. A container runtime has to be able to ask.
-  app.get('/health/ready', async (_req, res) => {
+  app.get('/health/ready', ah(async (_req, res) => {
     const checks = { db: false, orthanc: false };
     try {
       await db.execute(sql`select 1`);
@@ -65,7 +66,7 @@ export function createApp(deps: AppDeps): Express {
     checks.orthanc = await orthanc.ping().catch(() => false);
     const ok = checks.db && checks.orthanc;
     res.status(ok ? 200 : 503).json({ ok, version, components: checks });
-  });
+  }));
 
   // Secure unless the configured public origin is plain http — which only happens
   // on a laptop or a CI container. A deployed stack always sets TR_PUBLIC_URL to
@@ -75,7 +76,7 @@ export function createApp(deps: AppDeps): Express {
 
   const router: Router = express.Router();
 
-  router.post('/auth/login', async (req, res, next) => {
+  router.post('/auth/login', ah(async (req, res, next) => {
     try {
       const email = String(req.body?.email ?? '').trim().toLowerCase();
       const password = String(req.body?.password ?? '');
@@ -123,18 +124,18 @@ export function createApp(deps: AppDeps): Express {
       });
       return res.json({ ok: true, user: { id: user.id, role: user.role, name: user.displayName } });
     } catch (err) { next(err); }
-  });
+  }));
 
-  router.post('/auth/logout', async (req, res) => {
+  router.post('/auth/logout', ah(async (req, res) => {
     const token = readCookie(req, COOKIE);
     if (token) {
       await db.execute(sql`update telrad.sessions set revoked_at = now() where token_hash = ${hashToken(token)}`);
     }
     res.setHeader('Set-Cookie', cookieHeader('', 0));
     res.json({ ok: true });
-  });
+  }));
 
-  router.get('/auth/session', requireAuth(db), async (req: Ctx, res) => {
+  router.get('/auth/session', requireAuth(db), ah(async (req: Ctx, res) => {
     const p = req.principal!;
     const [clinician] = await db.select().from(clinicianProfiles).where(eq(clinicianProfiles.userId, p.userId));
     res.json({
@@ -150,9 +151,9 @@ export function createApp(deps: AppDeps): Express {
           }
         : null,
     });
-  });
+  }));
 
-  router.get('/studies', requireAuth(db), async (req: Ctx, res) => {
+  router.get('/studies', requireAuth(db), ah(async (req: Ctx, res) => {
     const tenantId = scopeTenant(req.principal!);
     const requested = String(req.query.state ?? 'orphan');
     if (!(LINK_STATES as readonly string[]).includes(requested)) {
@@ -188,9 +189,9 @@ export function createApp(deps: AppDeps): Express {
       action: 'studies.list', entity: 'studies', detail: { state, count: rows.length },
     });
     res.json({ ok: true, studies: rows });
-  });
+  }));
 
-  router.get('/studies/:id', requireAuth(db), async (req: Ctx, res) => {
+  router.get('/studies/:id', requireAuth(db), ah(async (req: Ctx, res) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ ok: false, error: 'bad_id' });
     const rows = await db.select().from(studies).where(eq(studies.id, id)).limit(1);
@@ -210,9 +211,9 @@ export function createApp(deps: AppDeps): Express {
       action: 'studies.read', entity: 'studies', entityId: String(id),
     });
     res.json({ ok: true, study: row });
-  });
+  }));
 
-  router.get('/audit/latest', requireAuth(db), async (req: Ctx, res) => {
+  router.get('/audit/latest', requireAuth(db), ah(async (req: Ctx, res) => {
     const p = req.principal!;
     if (p.role !== 'owner' && p.role !== 'console') {
       return res.status(403).json({ ok: false, error: 'forbidden' });
@@ -223,7 +224,7 @@ export function createApp(deps: AppDeps): Express {
       occurredAt: auditLog.occurredAt, rowHash: auditLog.rowHash, prevHash: auditLog.prevHash,
     }).from(auditLog).orderBy(desc(auditLog.id)).limit(50);
     res.json({ ok: true, entries: rows });
-  });
+  }));
 
   // Mounted first, and deliberately so. The session-scoped routers below guard
   // themselves with `r.use(requireAuth)`, and a router mounted at '/v1' runs that
@@ -242,12 +243,10 @@ export function createApp(deps: AppDeps): Express {
   app.use('/v1', viewRouter(db, orthanc));
   app.use('/v1', reportsRouter(db));
 
-  app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
-    // Never echo an exception message: it can carry a connection string or a
-    // path from the ingest layer.
-    console.error('unhandled', err);
-    res.status(500).json({ ok: false, error: 'internal_error' });
-  });
+  // Mounted last: this is the only responder for anything that reached `next` with
+  // an error, and it is what keeps a rejected database read from becoming a dead
+  // process. See handler.ts for why the wrapper above it is not optional.
+  app.use(errorHandler);
 
   return app;
 }

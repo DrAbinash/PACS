@@ -11,6 +11,7 @@ import {
 import { PRESENCE_LABEL, readerPresence, type ReaderState } from '@telrad/shared';
 import { Router } from 'express';
 import { requireAuth, requireRole, scoped, scopeTenant, type Ctx } from '../auth.js';
+import { ah } from '../handler.js';
 
 const READER_ROLES = ['radiologist', 'reviewer'];
 const PANEL_ROLES = ['owner', 'console', 'radiologist', 'reviewer'];
@@ -52,7 +53,7 @@ export function presenceRouter(db: Db): Router {
   // not that the person wants work, so 'paused' and 'away' survive heartbeats and
   // only an explicit state change clears them. A brand-new row, or one last left at
   // 'offline', means they have just signed on and are asking for cases.
-  r.post('/presence/heartbeat', async (req: Ctx, res) => {
+  r.post('/presence/heartbeat', ah(async (req: Ctx, res) => {
     if (!READER_ROLES.includes(req.principal!.role)) {
       return res.status(403).json({ ok: false, error: 'not_a_reader' });
     }
@@ -86,11 +87,11 @@ export function presenceRouter(db: Db): Router {
       routable: presence.routable, openCases: open,
       maxQueueSize: profile[0]?.maxQueueSize ?? 5,
     });
-  });
+  }));
 
   // Declaring a state is an operational fact worth keeping: "who was off the panel
   // at 02:00 when the STAT arrived" is a question a report desk gets asked.
-  r.patch('/presence', async (req: Ctx, res) => {
+  r.patch('/presence', ah(async (req: Ctx, res) => {
     if (!READER_ROLES.includes(req.principal!.role)) {
       return res.status(403).json({ ok: false, error: 'not_a_reader' });
     }
@@ -117,13 +118,13 @@ export function presenceRouter(db: Db): Router {
       detail: { from: before?.state ?? null, to: state },
     });
     res.json({ ok: true, state: row!.state });
-  });
+  }));
 
   // The board itself. One endpoint serves both the operator's routing decision and
   // the reader's "who else is on" view, so the two can never disagree about who is
   // green — the colour is computed here, from the same inputs the dispatcher will
   // later filter on.
-  r.get('/panel', async (req: Ctx, res) => {
+  r.get('/panel', ah(async (req: Ctx, res) => {
     if (!requireRole(req.principal, PANEL_ROLES, res)) return undefined;
     const tenantId = scopeTenant(req.principal!);
     const now = new Date();
@@ -206,7 +207,7 @@ export function presenceRouter(db: Db): Router {
       },
       panel,
     });
-  });
+  }));
 
   return r;
 }

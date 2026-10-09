@@ -11,6 +11,7 @@ import {
 import { cleanText, LIMITS, safeFilename, sniffKind } from '@telrad/shared';
 import { Router } from 'express';
 import { requireUploader, type Ctx } from '../auth.js';
+import { ah } from '../handler.js';
 
 export type UploadCtx = { tenantId: number; siteId: number | null; channel: 'agent' | 'browser'; actorUserId: number | null };
 
@@ -33,7 +34,7 @@ export function uploadsRouter(db: Db, inboxRoot: string): Router {
   const r = Router();
   r.use(requireUploader(db));
 
-  r.post('/batches', async (req: Ctx, res) => {
+  r.post('/batches', ah(async (req: Ctx, res) => {
     const who = uploader(req);
     if (!who) return res.status(400).json({ ok: false, error: 'tenant_required' });
 
@@ -74,12 +75,12 @@ export function uploadsRouter(db: Db, inboxRoot: string): Router {
       putPath: `/v1/uploads/batches/${batchId}/files/:filename`,
       sealPath: `/v1/uploads/batches/${batchId}/seal`,
     });
-  });
+  }));
 
   // Raw body, streamed to disk. express.json() is deliberately not mounted on this
   // path: buffering a 400 MB MRI study in memory would take the API down on the
   // same machine that holds the archive.
-  r.put('/batches/:batchId/files/:filename', async (req: Ctx, res) => {
+  r.put('/batches/:batchId/files/:filename', ah(async (req: Ctx, res) => {
     const who = uploader(req);
     if (!who) return res.status(400).json({ ok: false, error: 'tenant_required' });
 
@@ -156,9 +157,9 @@ export function uploadsRouter(db: Db, inboxRoot: string): Router {
       .where(eq(uploadBatches.id, batchId));
 
     res.json({ ok: true, fileId, bytes: received, kind, quarantined: kind === 'non_dicom' });
-  });
+  }));
 
-  r.post('/batches/:batchId/seal', async (req: Ctx, res) => {
+  r.post('/batches/:batchId/seal', ah(async (req: Ctx, res) => {
     const who = uploader(req);
     if (!who) return res.status(400).json({ ok: false, error: 'tenant_required' });
     const batchId = cleanText(req.params.batchId, 64);
@@ -183,9 +184,9 @@ export function uploadsRouter(db: Db, inboxRoot: string): Router {
       detail: { stored, quarantined: counts[0]?.quarantined ?? 0, filesExpected: batch.filesExpected },
     });
     res.json({ ok: true, batchId, stored, quarantined: counts[0]?.quarantined ?? 0 });
-  });
+  }));
 
-  r.get('/batches', async (req: Ctx, res) => {
+  r.get('/batches', ah(async (req: Ctx, res) => {
     const who = uploader(req);
     if (!who) return res.status(400).json({ ok: false, error: 'tenant_required' });
     const rows = await db.select().from(uploadBatches)
@@ -198,9 +199,9 @@ export function uploadsRouter(db: Db, inboxRoot: string): Router {
       ))
       .orderBy(desc(uploadBatches.createdAt)).limit(100);
     res.json({ ok: true, batches: rows });
-  });
+  }));
 
-  r.get('/batches/:batchId', async (req: Ctx, res) => {
+  r.get('/batches/:batchId', ah(async (req: Ctx, res) => {
     const who = uploader(req);
     if (!who) return res.status(400).json({ ok: false, error: 'tenant_required' });
     const batchId = cleanText(req.params.batchId, 64);
@@ -210,7 +211,7 @@ export function uploadsRouter(db: Db, inboxRoot: string): Router {
     }
     const files = await db.select().from(uploadFiles).where(eq(uploadFiles.batchId, batchId)).orderBy(uploadFiles.filename).limit(5000);
     res.json({ ok: true, batch, files });
-  });
+  }));
 
   // This router is mounted ahead of the session-scoped ones, so a path that matches
   // none of its routes has to be answered here. Falling through would hand the

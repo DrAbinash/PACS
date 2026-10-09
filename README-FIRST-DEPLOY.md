@@ -370,6 +370,21 @@ pnpm --filter @telrad/api test      # refuses to boot on a placeholder secret
 Then re-run the ingest poll a second time and confirm `studies` did not grow: the
 cursor is the only thing standing between a restart and a duplicated worklist.
 
+Then take the database away from a running API and ask what the reading room sees:
+
+```bash
+pnpm build && bash scripts/validation/run-fault-injection.sh
+```
+
+It builds its own throwaway Postgres on port 5413, bootstraps a fixture owner, starts
+`dist/server.js` on 3101, stops the container under it and checks that the request
+answers `500 {"ok":false,"error":"internal_error"}`, that `/health/live` is still
+answering from the same pid, and that reads return without a restart when the database
+comes back. The check exists because Express 4 does not await a route handler: before
+`ah()` in `apps/api/src/handler.ts`, one bad query ended the process and the container
+restart hid it. It removes its own container on the way out and touches nothing you
+have deployed.
+
 ## 10. Backup before any real study
 
 Three copies, and the third one off the premises: nightly `pg_dump` of the telrad

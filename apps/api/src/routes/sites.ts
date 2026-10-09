@@ -8,6 +8,7 @@ import {
 import { cleanText, hashToken, newToken } from '@telrad/shared';
 import { Router } from 'express';
 import { requireAuth, requireRole, scoped, type Ctx } from '../auth.js';
+import { ah } from '../handler.js';
 
 export function sitesRouter(db: Db): Router {
   const r = Router();
@@ -18,15 +19,15 @@ export function sitesRouter(db: Db): Router {
   r.use(scoped(['/sites', '/tokens'],
     (req: Ctx, res, next) => (requireRole(req.principal, ['owner', 'console'], res) ? next() : undefined)));
 
-  r.get('/sites', async (req: Ctx, res) => {
+  r.get('/sites', ah(async (req: Ctx, res) => {
     const tenantId = req.query.tenant_id ? Number(req.query.tenant_id) : null;
     const rows = await db.select().from(tenantSites)
       .where(tenantId === null ? sql`true` : eq(tenantSites.tenantId, tenantId))
       .orderBy(desc(tenantSites.createdAt)).limit(200);
     res.json({ ok: true, sites: rows.map((s) => ({ ...s, allowedCidrs: s.allowedCidrs })) });
-  });
+  }));
 
-  r.post('/sites', async (req: Ctx, res) => {
+  r.post('/sites', ah(async (req: Ctx, res) => {
     const tenantId = Number(req.body?.tenantId);
     const name = cleanText(req.body?.name, 120);
     // The value stored here is compared against Orthanc's RemoteAET — the AE title
@@ -49,9 +50,9 @@ export function sitesRouter(db: Db): Router {
       action: 'site.created', entity: 'tenant_sites', entityId: String(row!.id), detail: { aeTitle, cidrs },
     });
     res.status(201).json({ ok: true, site: row });
-  });
+  }));
 
-  r.post('/sites/:id/tokens', async (req: Ctx, res) => {
+  r.post('/sites/:id/tokens', ah(async (req: Ctx, res) => {
     const siteId = Number(req.params.id);
     const [site] = await db.select().from(tenantSites).where(eq(tenantSites.id, siteId)).limit(1);
     if (!site) return res.status(404).json({ ok: false, error: 'not_found' });
@@ -77,9 +78,9 @@ export function sitesRouter(db: Db): Router {
       action: 'token.issued', entity: 'api_tokens', entityId: `${site.id}:${label}`, detail: { prefix: token.slice(0, 8), ttlDays },
     });
     res.status(201).json({ ok: true, token, note: 'shown once; store it in the agent config now' });
-  });
+  }));
 
-  r.get('/sites/:id/tokens', async (req: Ctx, res) => {
+  r.get('/sites/:id/tokens', ah(async (req: Ctx, res) => {
     const siteId = Number(req.params.id);
     const rows = await db.select({
       id: apiTokens.id, label: apiTokens.label, tokenPrefix: apiTokens.tokenPrefix,
@@ -87,9 +88,9 @@ export function sitesRouter(db: Db): Router {
       expiresAt: apiTokens.expiresAt, revokedAt: apiTokens.revokedAt,
     }).from(apiTokens).where(eq(apiTokens.siteId, siteId)).orderBy(desc(apiTokens.createdAt)).limit(50);
     res.json({ ok: true, tokens: rows });
-  });
+  }));
 
-  r.post('/tokens/:id/revoke', async (req: Ctx, res) => {
+  r.post('/tokens/:id/revoke', ah(async (req: Ctx, res) => {
     const id = Number(req.params.id);
     const [tok] = await db.select({ id: apiTokens.id, tenantId: apiTokens.tenantId, label: apiTokens.label })
       .from(apiTokens).where(eq(apiTokens.id, id)).limit(1);
@@ -100,7 +101,7 @@ export function sitesRouter(db: Db): Router {
       action: 'token.revoked', entity: 'api_tokens', entityId: String(id), detail: { label: tok.label },
     });
     res.json({ ok: true, id });
-  });
+  }));
 
   return r;
 }

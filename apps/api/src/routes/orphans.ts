@@ -13,6 +13,7 @@ import {
 import { scoreOrder } from '@telrad/shared';
 import { Router } from 'express';
 import { requireAuth, scoped, scopeTenant, type Ctx } from '../auth.js';
+import { ah } from '../handler.js';
 
 // DICOM dates are YYYYMMDD strings; the matcher compares those, not Date objects.
 function iso(d: Date): string {
@@ -26,7 +27,7 @@ export function orphansRouter(db: Db): Router {
   // The queue an operator actually needs is not "rows with link_state != linked"
   // but rows plus the candidate the matcher would have chosen, because the fix is
   // almost always "that order" and making them re-derive it invites a wrong link.
-  r.get('/orphans', async (req: Ctx, res) => {
+  r.get('/orphans', ah(async (req: Ctx, res) => {
     const tenantId = scopeTenant(req.principal!);
     const limit = Math.min(Number(req.query.limit ?? 50) || 50, 200);
 
@@ -111,9 +112,9 @@ export function orphansRouter(db: Db): Router {
       action: 'orphans.list', entity: 'studies', detail: { count: rows.length },
     });
     res.json({ ok: true, orphans: withCandidates });
-  });
+  }));
 
-  r.post('/studies/:id/link', async (req: Ctx, res) => {
+  r.post('/studies/:id/link', ah(async (req: Ctx, res) => {
     const studyId = Number(req.params.id);
     const orderId = Number(req.body?.orderId);
     const tenantId = scopeTenant(req.principal!);
@@ -169,9 +170,9 @@ export function orphansRouter(db: Db): Router {
       detail: { orderId: order.id, accession: order.accessionNumber, previousState: study.linkState },
     });
     res.json({ ok: true, studyId, orderId: order.id });
-  });
+  }));
 
-  r.post('/studies/:id/unlink', async (req: Ctx, res) => {
+  r.post('/studies/:id/unlink', ah(async (req: Ctx, res) => {
     const studyId = Number(req.params.id);
     const tenantId = scopeTenant(req.principal!);
     const [study] = await db.select().from(studies).where(eq(studies.id, studyId)).limit(1);
@@ -197,7 +198,7 @@ export function orphansRouter(db: Db): Router {
       detail: { previousOrderId: study.orderId },
     });
     res.json({ ok: true, studyId });
-  });
+  }));
 
   return r;
 }

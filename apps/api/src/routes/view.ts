@@ -4,6 +4,7 @@ import { currentVersion, frameToBytes, parseMatlabFrame, tagValue } from '@telra
 import { Router, type Response } from 'express';
 import { OrthancError, type OrthancClient } from '../orthanc.js';
 import { requireAuth, requireRole, scoped, scopeTenant, type Ctx } from '../auth.js';
+import { ah } from '../handler.js';
 
 const READER_ROLES = ['radiologist', 'reviewer'];
 const BOARD_ROLES = ['owner', 'console', 'radiologist', 'reviewer'];
@@ -164,7 +165,7 @@ export function viewRouter(db: Db, orthanc: OrthancClient): Router {
     throw err;
   }
 
-  r.get('/view/:studyId', async (req: Ctx, res) => {
+  r.get('/view/:studyId', ah(async (req: Ctx, res) => {
     if (!requireRole(req.principal, BOARD_ROLES, res)) return undefined;
     const studyId = Number(req.params.studyId);
     if (!Number.isInteger(studyId)) return res.status(400).json({ ok: false, error: 'bad_id' });
@@ -231,7 +232,7 @@ export function viewRouter(db: Db, orthanc: OrthancClient): Router {
       windowing: 'client',
       pixelFormat: 'int16-le',
     });
-  });
+  }));
 
   async function instanceTags(req: Ctx, res: Response, orthancPath: (pk: string) => string) {
     const studyId = Number(req.params.studyId);
@@ -255,7 +256,7 @@ export function viewRouter(db: Db, orthanc: OrthancClient): Router {
     }
   }
 
-  r.get('/view/:studyId/instances/:instancePk', async (req: Ctx, res) => {
+  r.get('/view/:studyId/instances/:instancePk', ah(async (req: Ctx, res) => {
     if (!requireRole(req.principal, BOARD_ROLES, res)) return undefined;
     const out = await instanceTags(req, res, (pk) => `/instances/${pk}/tags`);
     if ('error' in out) return undefined;
@@ -288,9 +289,9 @@ export function viewRouter(db: Db, orthanc: OrthancClient): Router {
       contentDate: t('ContentDate'),
       patientOrientation: t('PatientOrientation'),
     });
-  });
+  }));
 
-  r.get('/view/:studyId/instances/:instancePk/frames/:frameIndex', async (req: Ctx, res) => {
+  r.get('/view/:studyId/instances/:instancePk/frames/:frameIndex', ah(async (req: Ctx, res) => {
     if (!requireRole(req.principal, BOARD_ROLES, res)) return undefined;
     const frameIndex = Number(req.params.frameIndex);
     if (!Number.isInteger(frameIndex) || frameIndex < 0 || frameIndex > 999) {
@@ -336,7 +337,7 @@ export function viewRouter(db: Db, orthanc: OrthancClient): Router {
     // Patient data, and a cached frame would outlive the assignment that made it readable.
     res.setHeader('Cache-Control', 'no-store');
     res.send(Buffer.from(frameToBytes(frame)));
-  });
+  }));
 
   return r;
 }

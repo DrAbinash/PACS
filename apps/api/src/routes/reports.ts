@@ -9,6 +9,7 @@ import {
 } from '@telrad/shared';
 import { Router, type Response } from 'express';
 import { requireAuth, requireRole, scoped, scopeTenant, type Ctx, type Principal } from '../auth.js';
+import { ah } from '../handler.js';
 
 const READER_ROLES = ['radiologist', 'reviewer'];
 // A report body is not a novel. The cap exists because this text goes into a jsonb column
@@ -225,7 +226,7 @@ export function reportsRouter(db: Db): Router {
   // Also before '/reports/:id'. This is the author's way back into a case: signing
   // completes the read, which takes the study off the desk that led to it, and a reader who
   // wants to check what they said on Tuesday would otherwise have no link to follow.
-  r.get('/reports/mine', async (req: Ctx, res) => {
+  r.get('/reports/mine', ah(async (req: Ctx, res) => {
     if (!requireRole(req.principal, READER_ROLES, res)) return undefined;
     const p = req.principal!;
     const rows = await db.select({
@@ -255,11 +256,11 @@ export function reportsRouter(db: Db): Router {
       action: 'report.mine', entity: 'reports', detail: { count: rows.length },
     });
     res.json({ ok: true, generatedAt: new Date(), reports: rows });
-  });
+  }));
 
   // Declared before '/reports/:id' deliberately: an Express pattern would otherwise swallow
   // this word as an id and answer 400 for the one path that lists real work.
-  r.get('/reports/awaiting-review', async (req: Ctx, res) => {
+  r.get('/reports/awaiting-review', ah(async (req: Ctx, res) => {
     if (!requireRole(req.principal, READER_ROLES, res)) return undefined;
     const p = req.principal!;
     const me = await profileOf(p.userId);
@@ -310,9 +311,9 @@ export function reportsRouter(db: Db): Router {
       action: 'report.review_queue', entity: 'reports', detail: { count: out.length },
     });
     res.json({ ok: true, generatedAt: new Date(), myGrade: me?.grade ?? null, awaiting: out });
-  });
+  }));
 
-  r.get('/reports/current', async (req: Ctx, res) => {
+  r.get('/reports/current', ah(async (req: Ctx, res) => {
     const studyId = Number(req.query.studyId);
     if (!Number.isInteger(studyId)) return res.status(400).json({ ok: false, error: 'bad_id' });
     const p = req.principal!;
@@ -327,9 +328,9 @@ export function reportsRouter(db: Db): Router {
       detail: { studyId, version: row.version, state: row.state },
     });
     return respond(res, p, row.id);
-  });
+  }));
 
-  r.get('/reports/:id', async (req: Ctx, res) => {
+  r.get('/reports/:id', ah(async (req: Ctx, res) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ ok: false, error: 'bad_id' });
     const p = req.principal!;
@@ -344,9 +345,9 @@ export function reportsRouter(db: Db): Router {
       detail: { studyId: row.studyId, version: row.version, state: row.state },
     });
     return respond(res, p, id);
-  });
+  }));
 
-  r.post('/reports', async (req: Ctx, res) => {
+  r.post('/reports', ah(async (req: Ctx, res) => {
     if (!requireRole(req.principal, READER_ROLES, res)) return undefined;
     const p = req.principal!;
     const studyId = Number(req.body?.studyId);
@@ -401,7 +402,7 @@ export function reportsRouter(db: Db): Router {
       detail: { studyId, accession: study.accession, version: row!.version },
     });
     return respond(res, p, row!.id, 201);
-  });
+  }));
 
   /**
    * Explicit save, called by a button. There is no autosave on this path: a draft that
@@ -409,7 +410,7 @@ export function reportsRouter(db: Db): Router {
    * moving target, and the audit row would describe text nobody had finished. The browser
    * holds unsaved words and says so in its own voice.
    */
-  r.patch('/reports/:id', async (req: Ctx, res) => {
+  r.patch('/reports/:id', ah(async (req: Ctx, res) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ ok: false, error: 'bad_id' });
     const p = req.principal!;
@@ -454,9 +455,9 @@ export function reportsRouter(db: Db): Router {
       },
     });
     return respond(res, p, id);
-  });
+  }));
 
-  r.post('/reports/:id/sign', async (req: Ctx, res) => {
+  r.post('/reports/:id/sign', ah(async (req: Ctx, res) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ ok: false, error: 'bad_id' });
     const p = req.principal!;
@@ -518,9 +519,9 @@ export function reportsRouter(db: Db): Router {
       },
     });
     return respond(res, p, id);
-  });
+  }));
 
-  r.post('/reports/:id/countersign', async (req: Ctx, res) => {
+  r.post('/reports/:id/countersign', ah(async (req: Ctx, res) => {
     if (!requireRole(req.principal, READER_ROLES, res)) return undefined;
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ ok: false, error: 'bad_id' });
@@ -571,9 +572,9 @@ export function reportsRouter(db: Db): Router {
       },
     });
     return respond(res, p, id);
-  });
+  }));
 
-  r.post('/reports/:id/amend', async (req: Ctx, res) => {
+  r.post('/reports/:id/amend', ah(async (req: Ctx, res) => {
     if (!requireRole(req.principal, READER_ROLES, res)) return undefined;
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ ok: false, error: 'bad_id' });
@@ -637,9 +638,9 @@ export function reportsRouter(db: Db): Router {
       },
     });
     return respond(res, p, next!.id, 201);
-  });
+  }));
 
-  r.post('/reports/:id/withdraw', async (req: Ctx, res) => {
+  r.post('/reports/:id/withdraw', ah(async (req: Ctx, res) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ ok: false, error: 'bad_id' });
     const p = req.principal!;
@@ -661,7 +662,7 @@ export function reportsRouter(db: Db): Router {
       detail: { studyId: row.studyId, version: row.version, reason: req.body?.reason ?? null },
     });
     return respond(res, p, id);
-  });
+  }));
 
   return r;
 }

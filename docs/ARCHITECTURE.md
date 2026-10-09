@@ -211,21 +211,31 @@ the only place a path appears.
   to run `pnpm --filter @telrad/worker dispatch-once`, which answers "None of the selected
   packages has a script" — a first deploy could be routed at all only by guessing the `tsx`
   invocation. It is a real script now, so the documented command is the working command.
+- **A failed query is a 500, and the process that answered it stays up.** Express 4 does not
+  await a route handler, so a rejected promise from one is not an HTTP error: it is an
+  `unhandledRejection`, whose default action in Node is to terminate the process. This happened
+  three times in code written for this repository — a `Date` interpolated into a raw `sql`
+  template reaches postgres.js untyped and throws while encoding the parameter — and each time
+  the visible failure was not the bad query but the api vanishing, `restart: unless-stopped`
+  hiding it as a blip, and every connected reader's in-flight request dying with it. `ah()` in
+  `apps/api/src/handler.ts` forwards a rejection (or a synchronous throw) to `next`, and
+  `errorHandler` mounted last turns it into `{"ok":false,"error":"internal_error"}` with no
+  message from the exception in it. All 49 registrations are wrapped — 40 in the eight routers,
+  7 in `app.ts`, and the two session guards, which reject on the same database. The boundary is
+  enforced twice over: `test/route-boundary.test.ts` scans the source and fails if a new route
+  hands Express a bare `async` handler, and it measures the failure it prevents by running the
+  same handler unwrapped in a child process (no error middleware reached, no response, non-zero
+  exit). `scripts/validation/run-fault-injection.sh` then does it against a real database that
+  is stopped and started again: 13 checks, one process throughout, `{"ok":false,…}` while the
+  database is gone, and 200 again after it returns without anyone restarting the api. A response
+  that had already begun streaming is the one case `errorHandler` cannot answer twice — it hands
+  the error back to Express and the socket is torn down, so a truncated report is a broken
+  request rather than a half-trusted one. **Any new raw `sql` fragment that takes a timestamp
+  must still bind `date.toISOString()` with an explicit `::timestamptz` cast** — the boundary
+  makes that mistake survivable, not correct.
 
 ## Known open items, stated rather than implied
 
-- **One failed query takes the whole api down.** Express 4 does not catch a rejected
-  promise from an `async` handler, so a database error inside any route becomes an
-  unhandled rejection and Node exits the process. This has now happened twice, in the
-  same way, in code I wrote: a `Date` interpolated into a raw `sql` template reaches
-  postgres.js untyped and throws while encoding the parameter. The first was the panel
-  read; the second was the dispatcher's roster subquery a week later, which killed the
-  api mid-verification. `restart: unless-stopped` hides it as a two-second blip and the
-  in-flight requests of every connected reader fail with it. The fix is a `ah()` wrapper
-  that forwards rejections to `next(err)` at every route registration — mechanical,
-  ~30 call sites, deliberately not done in a hurry. Until it is, `/health/ready` plus a
-  restart count is the only evidence, and **any new raw `sql` fragment that takes a
-  timestamp must bind `date.toISOString()` with an explicit `::timestamptz` cast.**
 - **The image node in this deployment cannot serve a real viewer, and the config says it
   can.** `infra/orthanc/orthanc.json` contains a `DicomWeb` block with `Enable: true`, but
   `/plugins` on the pinned container answers `["explorer.js", "gdcm", "orthanc-explorer-2"]`
@@ -399,6 +409,7 @@ schedule, which is why retention is data and not a constant.
 | Routing and escalation stop at a signature | **Measured on the same run.** With the clock pushed to sit between the signature and now, the sweep reported `escalate checked=1 staged=0 breached=0 actions=none`, the late board stayed empty, `count(*)` over `sla.escalated`/`sla.breached` for that accession was 0, and no live assignment survived. The first version of this run did **fail** the last of those: signing completed the assignment, which returned the study to the dispatchable queue and produced a fresh offer (`attempt 2`) for a case two names had already answered. `dispatchableStudies` now refuses any study whose clock carries `signed_at` — the same column `dueStages` stops at — so the operator's "why is this nobody's case" read and the sweep cannot disagree about an answered study |
 | Console report desk | Built and **seen in the browser** end to end as two different readers. As Dr Chief: *Start the report* → five fields with Findings and Impression marked required, the status line reading `unsaved words` while typing and `saved` after the button, Sign enabled only when both required fields hold words, and after signing the text renders read-only under `Signed / Dr Chief · WB-400004 / 12:51:46` with `Second name / required, and missing`. As Dr Chief again on somebody else's report: the review queue named the case and their own grade, *Review* opened the images with the bar saying plainly why they were not holding the case, and *Add my second name* moved the panel from `signed` to `verified` and filled the second block. As Dr Junior: the same queue entry refused them with the sentence, and the viewer still opened. The desk now carries a `report signed v2` chip on each case, and "Reports I signed" lists what a reader has already answered — signing takes the case off the desk, so without that list there is no link back to one's own report. Layout has not been reviewed as an image: this browser gives no viewport |
 | `pnpm --filter @telrad/worker dispatch-once` | Was a mode of `main.ts` with no package script, so **every documented way of running the sweep failed** with "None of the selected packages has a script" — three validation scripts and the deploy notes among them. It is a real script now; the verification above ran it as written |
+| Async-error boundary on every route (`apps/api/src/handler.ts`) | **Proven live** by `scripts/validation/run-fault-injection.sh`: a throwaway database was stopped under a running API and 13 checks passed — the request answered `500 {"ok":false,"error":"internal_error"}` (nothing from the exception in the body), `/health/live` kept answering from **the same pid**, a second request did the same, `requireAuth` rejecting on the way in behaved identically, and reads returned to 200 when the database came back with no restart in between. 49 registrations wrapped. `test/route-boundary.test.ts` holds the line: it scans `apps/api/src` and fails on a bare `async` handler, and it measures the failure mode in a child process (error middleware never reached, no response, non-zero exit) so the fix is not taken on trust |
 | Orthanc capability probe (`.tmp` scripts, now `scripts/validation/probe-*.py`) | Run against the pinned digest before the viewer was designed: plugins loaded, tag endpoints, every rendering endpoint with and without a window, the numeric frame path and its exact text shape. The result is the six viewer rules above, and it overturned three endpoint names this repository's own worker had assumed |
 | `apps/api` viewer routes (`/v1/view/:studyId`) | **Proven live over HTTP** (`scripts/validation/run-view-flow.py`, 17 assertions): the holder opens a case and gets its series with instance ids; the frame arrives as 8,192 bytes of `int16-le` with `X-Telrad-Pixel-Count: 4096` and `Cache-Control: no-store`, and **all 4,096 values equal the arithmetic the fixture wrote** (`0 of 4096 differ`); two slices of one study are two different images. Another reader gets 403 `not_your_case`, an instance belonging to somebody else's study gets 404 `not_in_this_study`, no session gets 401, a malformed node id gets 400 before the node is asked, and `frameIndex` out of range gets 400. An operator may open a case they do not hold, and every open writes `view.open` |
 | Console viewer | Built and **seen in the browser** as the reader who holds the case: `ACC-VIEW-1` opens full-window with the header, the series strip (`HEAD NATIVE 3`), `slice 1 / 3` and `64×64 · 12-bit · windowed here`. The canvas holds an image, not a rectangle — **217 distinct grey levels, min 0 / max 255, mean 61.2**; ArrowDown moved to slice 2 (222 distinct, mean 58.7); narrowing the window to 60 collapsed it to 45 distinct levels, which is the window doing work on this side of the wire. The chest reader's DX film, which carries **no WindowCenter at all**, drew through the stored-range fallback at 80 distinct levels / mean 52.3 rather than going black. Console shows only the expected 401s from `/v1/auth/session` after a logout |

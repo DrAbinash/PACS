@@ -9,6 +9,7 @@ import {
 import { cleanText, normaliseMrn, validateOrderInput, validatePatientInput } from '@telrad/shared';
 import { Router } from 'express';
 import { requireAuth, scoped, scopeTenant, type Ctx } from '../auth.js';
+import { ah } from '../handler.js';
 
 // The tenant a write lands in is decided here, once: a center role is pinned to its
 // own tenant, and owner/console must name one explicitly. There is no path where an
@@ -26,7 +27,7 @@ export function clinicalRouter(db: Db): Router {
   const r = Router();
   r.use(scoped(['/patients', '/orders'], requireAuth(db)));
 
-  r.post('/patients', async (req: Ctx, res) => {
+  r.post('/patients', ah(async (req: Ctx, res) => {
     const tenantId = actorTenant(req);
     if (!tenantId) return res.status(400).json({ ok: false, error: 'tenant_required' });
 
@@ -59,9 +60,9 @@ export function clinicalRouter(db: Db): Router {
       detail: { mrn },
     });
     res.status(201).json({ ok: true, patient: row });
-  });
+  }));
 
-  r.get('/patients', async (req: Ctx, res) => {
+  r.get('/patients', ah(async (req: Ctx, res) => {
     const tenantId = scopeTenant(req.principal!);
     const q = cleanText(req.query.q ?? '', 64);
     const limit = Math.min(Number(req.query.limit ?? 25) || 25, 100);
@@ -72,9 +73,9 @@ export function clinicalRouter(db: Db): Router {
       ))
       .orderBy(desc(patients.createdAt)).limit(limit);
     res.json({ ok: true, patients: rows });
-  });
+  }));
 
-  r.post('/orders', async (req: Ctx, res) => {
+  r.post('/orders', ah(async (req: Ctx, res) => {
     const tenantId = actorTenant(req);
     if (!tenantId) return res.status(400).json({ ok: false, error: 'tenant_required' });
 
@@ -127,9 +128,9 @@ export function clinicalRouter(db: Db): Router {
       detail: { accession: row!.accessionNumber, modality: row!.modalityCode, priority: row!.priority },
     });
     res.status(201).json({ ok: true, order: row });
-  });
+  }));
 
-  r.patch('/orders/:id', async (req: Ctx, res) => {
+  r.patch('/orders/:id', ah(async (req: Ctx, res) => {
     const id = Number(req.params.id);
     const tenantId = scopeTenant(req.principal!);
     const rows = await db.select().from(orders)
@@ -160,9 +161,9 @@ export function clinicalRouter(db: Db): Router {
       action: 'order.updated', entity: 'orders', entityId: String(id), detail: patch,
     });
     res.json({ ok: true, id });
-  });
+  }));
 
-  r.get('/orders', async (req: Ctx, res) => {
+  r.get('/orders', ah(async (req: Ctx, res) => {
     const tenantId = scopeTenant(req.principal!);
     const state = cleanText(req.query.state ?? 'open', 16).toLowerCase();
     const allowed = ['open', 'scheduled', 'completed', 'cancelled', 'all'] as const;
@@ -183,7 +184,7 @@ export function clinicalRouter(db: Db): Router {
       ))
       .orderBy(desc(orders.orderedAt)).limit(limit);
     res.json({ ok: true, orders: rows });
-  });
+  }));
 
   return r;
 }

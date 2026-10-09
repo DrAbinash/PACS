@@ -22,6 +22,7 @@ import {
 } from '@telrad/shared';
 import { Router } from 'express';
 import { requireAuth, requireRole, scoped, scopeTenant, type Ctx } from '../auth.js';
+import { ah } from '../handler.js';
 
 const READER_ROLES = ['radiologist', 'reviewer'];
 const BOARD_ROLES = ['owner', 'console', 'radiologist', 'reviewer'];
@@ -36,7 +37,7 @@ export function worklistRouter(db: Db): Router {
 
   // A live offer, an accepted case, or a read in progress — all of them are "mine
   // right now", and a reader holding two cases must be able to see both.
-  r.get('/my/work', async (req: Ctx, res) => {
+  r.get('/my/work', ah(async (req: Ctx, res) => {
     if (!requireRole(req.principal, READER_ROLES, res)) return undefined;
     const userId = req.principal!.userId;
     const now = new Date();
@@ -109,9 +110,9 @@ export function worklistRouter(db: Db): Router {
         report: reportOfStudy.get(row.studyId) ?? null,
       })),
     });
-  });
+  }));
 
-  r.post('/assignments/:id/accept', async (req: Ctx, res) => {
+  r.post('/assignments/:id/accept', ah(async (req: Ctx, res) => {
     if (!requireRole(req.principal, READER_ROLES, res)) return undefined;
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ ok: false, error: 'bad_id' });
@@ -162,9 +163,9 @@ export function worklistRouter(db: Db): Router {
     });
 
     res.json({ ok: true, assignmentId: row.id, studyId: row.studyId, acceptedAt: now, lockToken: row.lockToken });
-  });
+  }));
 
-  r.post('/assignments/:id/decline', async (req: Ctx, res) => {
+  r.post('/assignments/:id/decline', ah(async (req: Ctx, res) => {
     if (!requireRole(req.principal, READER_ROLES, res)) return undefined;
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ ok: false, error: 'bad_id' });
@@ -200,13 +201,13 @@ export function worklistRouter(db: Db): Router {
       detail: { studyId: row.studyId, reason },
     });
     res.json({ ok: true, assignmentId: row.id, studyId: row.studyId, state: 'returned' });
-  });
+  }));
 
   // The operator's question when a case is sitting: not "is anything unassigned" but
   // "who was skipped, and for what reason". The answer is the dispatcher's own rule run
   // in read mode against the same two queries, so this cannot report a gap the sweep
   // does not have — or hide one it does.
-  r.get('/dispatch/unassigned', async (req: Ctx, res) => {
+  r.get('/dispatch/unassigned', ah(async (req: Ctx, res) => {
     if (!requireRole(req.principal, BOARD_ROLES, res)) return undefined;
     const tenantId = scopeTenant(req.principal!);
     const now = new Date();
@@ -280,14 +281,14 @@ export function worklistRouter(db: Db): Router {
       },
       unassigned,
     });
-  });
+  }));
 
   // A person, not the router. When widening the pool still leaves a case unassigned, an
   // operator puts it on somebody's desk and says why. This overrides *routability* only:
   // coverage may be passed over because a named human is taking responsibility for that
   // decision, and the mismatch is reported back and audited rather than quietly
   // normalised away.
-  r.post('/assignments', async (req: Ctx, res) => {
+  r.post('/assignments', ah(async (req: Ctx, res) => {
     if (!requireRole(req.principal, ['owner', 'console'], res)) return undefined;
     const studyId = Number(req.body?.studyId);
     const clinicianUserId = Number(req.body?.clinicianUserId);
@@ -374,12 +375,12 @@ export function worklistRouter(db: Db): Router {
       heldBy: reader.name,
       warning: notListed.length > 0 ? `${reader.name} does not list ${notListed.join(' or ')}` : null,
     });
-  });
+  }));
 
   // The late board: not "what is unassigned" but "what is running out, who holds it, and
   // has the system said anything yet". The stage arithmetic is the worker's own rule, so
   // the board cannot show a case as calm while the sweep is escalating it.
-  r.get('/escalations', async (req: Ctx, res) => {
+  r.get('/escalations', ah(async (req: Ctx, res) => {
     if (!requireRole(req.principal, BOARD_ROLES, res)) return undefined;
     const tenantId = scopeTenant(req.principal!);
     const now = new Date();
@@ -474,7 +475,7 @@ export function worklistRouter(db: Db): Router {
         holder: holderOf.get(c.studyId) ?? null,
       })),
     });
-  });
+  }));
 
   return r;
 }

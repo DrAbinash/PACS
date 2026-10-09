@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm';
 import type { Db } from '@telrad/db';
 import { hashToken } from '@telrad/shared';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
+import { ah } from './handler.js';
 
 export const COOKIE = 'telrad_session';
 
@@ -51,22 +52,22 @@ export async function loadAgent(db: Db, bearer: string): Promise<AgentPrincipal 
   return { tokenId: found.id, tenantId: found.tenant_id, siteId: found.site_id, label: found.label };
 }
 
-export function requireAuth(db: Db) {
-  return async (req: Ctx, res: Response, next: NextFunction) => {
+export function requireAuth(db: Db): RequestHandler {
+  return ah(async (req: Ctx, res: Response, next: NextFunction) => {
     const token = readCookie(req, COOKIE);
     if (!token) return res.status(401).json({ ok: false, error: 'unauthenticated' });
     const principal = await loadPrincipal(db, token);
     if (!principal) return res.status(401).json({ ok: false, error: 'unauthenticated' });
     req.principal = principal;
     next();
-  };
+  });
 }
 
 // Uploads accept either a session (a person at the desk using the browser) or a
 // site token (the agent on the modality PC). Both resolve to a tenant and a site,
 // and the code downstream does not care which door it came through.
-export function requireUploader(db: Db) {
-  return async (req: Ctx, res: Response, next: NextFunction) => {
+export function requireUploader(db: Db): RequestHandler {
+  return ah(async (req: Ctx, res: Response, next: NextFunction) => {
     const bearer = bearerOf(req);
     if (bearer) {
       const agent = await loadAgent(db, bearer);
@@ -88,7 +89,7 @@ export function requireUploader(db: Db) {
       }
     }
     return res.status(401).json({ ok: false, error: 'unauthenticated' });
-  };
+  });
 }
 
 export function bearerOf(req: Request): string | null {
