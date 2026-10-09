@@ -1,9 +1,17 @@
 import { and, desc, eq, ne, or, sql } from 'drizzle-orm';
 import type { Db } from '@telrad/db';
-import { assignments, orders, patients, slaClocks, studies, subSpecialties, tenantSites } from '@telrad/db';
+import {
+  appendAudit,
+  assignments,
+  orders,
+  patients,
+  slaClocks,
+  studies,
+  subSpecialties,
+  tenantSites,
+} from '@telrad/db';
 import { scoreOrder } from '@telrad/shared';
 import { Router } from 'express';
-import { appendAudit } from '../audit.js';
 import { requireAuth, scoped, scopeTenant, type Ctx } from '../auth.js';
 
 // DICOM dates are YYYYMMDD strings; the matcher compares those, not Date objects.

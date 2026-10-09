@@ -1,9 +1,16 @@
 import { and, desc, eq, sql } from 'drizzle-orm';
 import type { Db } from '@telrad/db';
-import { auditLog, clinicianProfiles, sessions, studies, tenants, users } from '@telrad/db';
+import {
+  appendAudit,
+  auditLog,
+  clinicianProfiles,
+  sessions,
+  studies,
+  tenants,
+  users,
+} from '@telrad/db';
 import { LINK_STATES, hashToken, newToken, verifyPassword, type LinkState } from '@telrad/shared';
 import express, { type Express, type NextFunction, type Request, type Response, type Router } from 'express';
-import { appendAudit } from './audit.js';
 import { COOKIE, readCookie, requireAuth, scopeTenant, type Ctx } from './auth.js';
 import { clinicalRouter } from './routes/clinical.js';
 import { orphansRouter } from './routes/orphans.js';

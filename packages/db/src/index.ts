@@ -6,6 +6,7 @@ import * as schema from './schema.js';
 export { schema };
 export * from './schema.js';
 export * from './dispatch-reads.js';
+export * from './audit.js';
 
 export const SCHEMA = 'telrad';
 

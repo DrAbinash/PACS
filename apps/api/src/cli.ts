@@ -1,7 +1,14 @@
 import { sql } from 'drizzle-orm';
 import {
-  auditLog, clinicianProfiles, escalationRules, modalities, openDb, storageNodes, subSpecialties,
-  tenants, users,
+  auditLog,
+  clinicianProfiles,
+  escalationRules,
+  modalities,
+  openDb,
+  storageNodes,
+  subSpecialties,
+  tenants,
+  users,
 } from '@telrad/db';
 import { auditRowHash, hashPassword } from '@telrad/shared';
 

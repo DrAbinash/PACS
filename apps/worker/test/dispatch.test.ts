@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { dispatchSweep, type DispatchPort, type OfferRecord, type QueueStudy } from '../src/dispatch.js';
-import type { ReaderCandidate } from '@telrad/shared';
+import type { EscalationRule, ReaderCandidate } from '@telrad/shared';
+
+// The stages bootstrap ships, so the widening tests exercise the real thresholds.
+const WIDEN_FIRST: EscalationRule[] = [
+  { tenantId: null, priority: 'stat', stage: 1, atElapsedPct: 55, action: 'widen_pool' },
+  { tenantId: null, priority: 'urgent', stage: 1, atElapsedPct: 55, action: 'widen_pool' },
+  { tenantId: null, priority: 'routine', stage: 1, atElapsedPct: 55, action: 'widen_pool' },
+];
 
 const NOW = new Date('2026-10-09T08:00:00Z');
 
@@ -13,6 +20,8 @@ const study = (over: Partial<QueueStudy> = {}): QueueStudy => ({
   modalityCode: 'CT',
   tenantTimezone: 'Asia/Kolkata',
   receivedAt: new Date('2026-10-09T07:50:00Z'),
+  escalationStage: 0,
+  deadlineAt: new Date('2026-10-09T11:50:00Z'),
   ...over,
 });
 
@@ -43,6 +52,7 @@ function fakePort(opts: {
   prior?: Map<number, OfferRecord>;
   refuse?: boolean;
   expired?: number;
+  rules?: EscalationRule[];
 }): { port: DispatchPort; offers: Offer[]; cutoffs: Date[] } {
   const offers: Offer[] = [];
   const cutoffs: Date[] = [];
@@ -59,6 +69,7 @@ function fakePort(opts: {
         return true;
       },
       async expireUnaccepted(cutoff) { cutoffs.push(cutoff); return opts.expired ?? 0; },
+      async rules() { return opts.rules ?? []; },
     },
   };
 }
@@ -143,9 +154,37 @@ describe('dispatchSweep', () => {
       async offersByStudy() { return new Map(); },
       async offer() { return true; },
       async expireUnaccepted() { return 0; },
+      async rules() { return []; },
     };
     const r = await dispatchSweep(port, { now: () => NOW });
-    expect(r).toEqual({ expired: 0, offered: 0, unassigned: [] });
+    expect(r).toEqual({ expired: 0, offered: 0, unassigned: [], widened: 0 });
     expect(panelCalls).toBe(0);
+  });
+});
+
+describe('widening under escalation', () => {
+  // The stage on the clock is the only thing that lets a full reader be used, so the
+  // sweep has to read it per case rather than globally.
+  it('offers a full reader only once the case has reached the widen-pool stage', async () => {
+    const full = reader({ userId: 61, name: 'Dr Full', openCases: 2, maxQueueSize: 2 });
+
+    const before = await dispatchSweep(fakePort({ queue: [study()], panel: [full] }).port, { now: () => NOW });
+    expect(before.offered).toBe(0);
+    expect(before.unassigned[0]?.gap?.missing).toContain('queue_full');
+
+    const after = fakePort({ queue: [study({ escalationStage: 1 })], panel: [full], rules: WIDEN_FIRST });
+    const r = await dispatchSweep(after.port, { now: () => NOW });
+    expect(r.offered).toBe(1);
+    expect(r.widened).toBe(1);
+    expect(after.offers.map((o) => o.userId)).toEqual([61]);
+  });
+
+  it('does not widen a case whose tenant switched widening off', async () => {
+    const full = reader({ userId: 62, name: 'Dr Full', openCases: 2, maxQueueSize: 2 });
+    const r = await dispatchSweep(
+      fakePort({ queue: [study({ escalationStage: 3 })], panel: [full], rules: [] }).port,
+      { now: () => NOW },
+    );
+    expect(r.offered).toBe(0);
   });
 });

@@ -1,9 +1,15 @@
 import { and, eq, gt, inArray, lte, ne, sql } from 'drizzle-orm';
 import type { Db } from '@telrad/db';
-import { assignments, clinicianProfiles, readerAvailability, rosters, users } from '@telrad/db';
+import {
+  appendAudit,
+  assignments,
+  clinicianProfiles,
+  readerAvailability,
+  rosters,
+  users,
+} from '@telrad/db';
 import { PRESENCE_LABEL, readerPresence, type ReaderState } from '@telrad/shared';
 import { Router } from 'express';
-import { appendAudit } from '../audit.js';
 import { requireAuth, requireRole, scoped, scopeTenant, type Ctx } from '../auth.js';
 
 const READER_ROLES = ['radiologist', 'reviewer'];

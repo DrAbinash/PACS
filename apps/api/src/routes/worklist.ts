@@ -1,13 +1,25 @@
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { Db } from '@telrad/db';
 import {
-  assignments, dispatchableStudies, offerHistory, panelReaders, patients, slaClocks, studies,
+  appendAudit,
+  assignments,
+  clinicianProfiles,
+  dispatchableStudies,
+  escalationRules,
+  offerHistory,
+  panelReaders,
+  patients,
+  slaClocks,
+  studies,
+  tenants,
+  users,
 } from '@telrad/db';
 import {
-  OFFER_ACCEPT_SECONDS, cleanText, newToken, pickReader, tzOffsetMinutes, type DispatchStudy,
+  OFFER_ACCEPT_SECONDS, cleanText, coversCode, dueStages, elapsedPct, isBreached, newToken, pickReader,
+  tzOffsetMinutes, widenStage,
+  type ClockLike, type DispatchStudy, type EscalationRule,
 } from '@telrad/shared';
 import { Router } from 'express';
-import { appendAudit } from '../audit.js';
 import { requireAuth, requireRole, scoped, scopeTenant, type Ctx } from '../auth.js';
 
 const READER_ROLES = ['radiologist', 'reviewer'];
@@ -19,7 +31,7 @@ const BOARD_ROLES = ['owner', 'console', 'radiologist', 'reviewer'];
 // reader themselves says so, and every way out of it writes a reason.
 export function worklistRouter(db: Db): Router {
   const r = Router();
-  r.use(scoped(['/my', '/assignments', '/dispatch'], requireAuth(db)));
+  r.use(scoped(['/my', '/assignments', '/dispatch', '/escalations'], requireAuth(db)));
 
   // A live offer, an accepted case, or a read in progress — all of them are "mine
   // right now", and a reader holding two cases must be able to see both.
@@ -184,6 +196,11 @@ export function worklistRouter(db: Db): Router {
     const tenantIds = [...new Set(queue.map((s) => s.tenantId))];
     const readers = tenantIds.length === 0 ? [] : await panelReaders(db, tenantIds, now);
     const prior = await offerHistory(db, queue.map((s) => s.id));
+    const rules = (await db.select({
+      tenantId: escalationRules.tenantId, priority: escalationRules.priority, stage: escalationRules.stage,
+      atElapsedPct: escalationRules.atElapsedPct, action: escalationRules.action,
+    }).from(escalationRules).where(eq(escalationRules.enabled, true)))
+      .map((row) => ({ ...row, action: row.action as EscalationRule['action'] }));
 
     const unassigned = queue.map((row) => {
       const study: DispatchStudy = {
@@ -196,7 +213,11 @@ export function worklistRouter(db: Db): Router {
       };
       // Same rotation history the sweep uses, so this cannot promise the operator a
       // reader the dispatcher has already asked and lost.
-      const decision = pickReader(study, readers, { now, alreadyOfferedTo: prior.get(row.id)?.userIds ?? [] });
+      const widenAt = widenStage(rules, row.tenantId, row.priority);
+      const poolWidened = widenAt !== null && row.escalationStage >= widenAt;
+      const decision = pickReader(study, readers, {
+        now, alreadyOfferedTo: prior.get(row.id)?.userIds ?? [], allowAtCap: poolWidened,
+      });
       const closest = decision.considered[0];
       return {
         studyId: row.id,
@@ -207,6 +228,12 @@ export function worklistRouter(db: Db): Router {
         subSpecialty: row.subSpecialtyCode,
         receivedAt: row.receivedAt,
         waitingMinutes: Math.round((now.getTime() - row.receivedAt.getTime()) / 60_000),
+        escalationStage: row.escalationStage,
+        deadlineAt: row.deadlineAt,
+        elapsedPct: row.deadlineAt ? elapsedPct({ startedAt: row.receivedAt, deadlineAt: row.deadlineAt }, now) : null,
+        // Reported because a widened offer is the one routing decision a reader would
+        // want to know was made under time pressure rather than by choice.
+        poolWidened,
         // 'waiting_for_sweep' is the ordinary state: the sweep runs on the worker's
         // poll interval, so a case that routes cleanly stays unassigned for seconds.
         status: decision.chosenUserId !== null ? 'waiting_for_sweep' : 'blocked',
@@ -232,6 +259,200 @@ export function worklistRouter(db: Db): Router {
         readersWithCapacity: readers.filter((reader) => reader.openCases < reader.maxQueueSize).length,
       },
       unassigned,
+    });
+  });
+
+  // A person, not the router. When widening the pool still leaves a case unassigned, an
+  // operator puts it on somebody's desk and says why. This overrides *routability* only:
+  // coverage may be passed over because a named human is taking responsibility for that
+  // decision, and the mismatch is reported back and audited rather than quietly
+  // normalised away.
+  r.post('/assignments', async (req: Ctx, res) => {
+    if (!requireRole(req.principal, ['owner', 'console'], res)) return undefined;
+    const studyId = Number(req.body?.studyId);
+    const clinicianUserId = Number(req.body?.clinicianUserId);
+    const reason = cleanText(req.body?.reason, 200);
+    if (!Number.isInteger(studyId) || !Number.isInteger(clinicianUserId)) {
+      return res.status(400).json({ ok: false, error: 'bad_id' });
+    }
+    if (!reason) return res.status(422).json({ ok: false, error: 'a reason is required for a manual assignment' });
+
+    const [study] = await db.select({
+      id: studies.id,
+      tenantId: studies.tenantId,
+      linkState: studies.linkState,
+      subSpecialtyCode: studies.subSpecialtyCode,
+      modalityCode: studies.modalityCode,
+      accession: studies.accessionNumber,
+    }).from(studies).where(eq(studies.id, studyId)).limit(1);
+    if (!study) return res.status(404).json({ ok: false, error: 'not_found' });
+    if (study.linkState !== 'linked' || study.tenantId === null) {
+      return res.status(422).json({ ok: false, error: 'only a linked study with a tenant can be assigned' });
+    }
+
+    const [reader] = await db.select({
+      userId: users.id,
+      name: users.displayName,
+      role: users.role,
+      status: users.status,
+      subspecialtyCodes: clinicianProfiles.subspecialtyCodes,
+      modalityCodes: clinicianProfiles.modalityCodes,
+    }).from(users)
+      .innerJoin(clinicianProfiles, eq(clinicianProfiles.userId, users.id))
+      .where(eq(users.id, clinicianUserId))
+      .limit(1);
+    if (!reader || !READER_ROLES.includes(reader.role) || reader.status !== 'active') {
+      // 404 rather than "that account is not a reader": probing ids from a console
+      // session should not enumerate who else has an account.
+      return res.status(404).json({ ok: false, error: 'not_found' });
+    }
+
+    const now = new Date();
+    const prior = await offerHistory(db, [studyId]);
+    const [created] = await db.insert(assignments)
+      .values({
+        studyId,
+        tenantId: study.tenantId,
+        clinicianUserId: reader.userId,
+        state: 'accepted',
+        offeredAt: now,
+        acceptedAt: now,
+        attemptNo: (prior.get(studyId)?.maxAttempt ?? 0) + 1,
+        escalatedBy: req.principal!.userId,
+        // Minted and deliberately not echoed: nothing consumes a lock token until the
+        // report path exists, and returning one here would put a clinical credential in
+        // an operator's response history.
+        lockToken: newToken(24),
+      })
+      .onConflictDoNothing()
+      .returning({ id: assignments.id, studyId: assignments.studyId });
+    if (!created) return res.status(409).json({ ok: false, error: 'already_assigned' });
+
+    await db.update(slaClocks).set({ acceptedAt: now })
+      .where(and(eq(slaClocks.studyId, studyId), isNull(slaClocks.acceptedAt)));
+
+    const notListed: string[] = [];
+    if (study.subSpecialtyCode && !coversCode(reader.subspecialtyCodes, study.subSpecialtyCode)) {
+      notListed.push(`sub-specialty ${study.subSpecialtyCode}`);
+    }
+    if (study.modalityCode && !coversCode(reader.modalityCodes, study.modalityCode)) {
+      notListed.push(`modality ${study.modalityCode}`);
+    }
+
+    await appendAudit(db, {
+      actorUserId: req.principal!.userId, actorKind: 'human', tenantId: study.tenantId,
+      action: 'assignment.manual', entity: 'assignments', entityId: String(created.id),
+      detail: {
+        studyId, accession: study.accession, clinicianUserId: reader.userId, reason, coverageNotListed: notListed,
+      },
+    });
+    res.status(201).json({
+      ok: true,
+      assignmentId: created.id,
+      studyId,
+      clinicianUserId: reader.userId,
+      heldBy: reader.name,
+      warning: notListed.length > 0 ? `${reader.name} does not list ${notListed.join(' or ')}` : null,
+    });
+  });
+
+  // The late board: not "what is unassigned" but "what is running out, who holds it, and
+  // has the system said anything yet". The stage arithmetic is the worker's own rule, so
+  // the board cannot show a case as calm while the sweep is escalating it.
+  r.get('/escalations', async (req: Ctx, res) => {
+    if (!requireRole(req.principal, BOARD_ROLES, res)) return undefined;
+    const tenantId = scopeTenant(req.principal!);
+    const now = new Date();
+    const limit = Math.min(Number(req.query.limit ?? 100) || 100, 300);
+
+    const clocks = await db.select({
+      clockId: slaClocks.id,
+      studyId: slaClocks.studyId,
+      tenantId: slaClocks.tenantId,
+      tenantCode: tenants.code,
+      accession: studies.accessionNumber,
+      modality: studies.modalityCode,
+      subSpecialty: studies.subSpecialtyCode,
+      priority: slaClocks.priority,
+      startedAt: studies.receivedAt,
+      deadlineAt: slaClocks.deadlineAt,
+      stage: slaClocks.escalationStage,
+      lastEscalatedAt: slaClocks.lastEscalatedAt,
+      breached: slaClocks.breached,
+      breachedAt: slaClocks.breachedAt,
+      signedAt: slaClocks.signedAt,
+      acceptedAt: slaClocks.acceptedAt,
+    }).from(slaClocks)
+      .innerJoin(studies, eq(studies.id, slaClocks.studyId))
+      .leftJoin(tenants, eq(tenants.id, slaClocks.tenantId))
+      .where(and(
+        isNull(slaClocks.deliveredAt),
+        tenantId === null ? undefined : eq(slaClocks.tenantId, tenantId),
+      ))
+      .orderBy(slaClocks.deadlineAt)
+      .limit(limit);
+
+    const held = clocks.length === 0 ? [] : await db.select({
+      studyId: assignments.studyId,
+      userId: assignments.clinicianUserId,
+      name: users.displayName,
+      state: assignments.state,
+    }).from(assignments)
+      .innerJoin(users, eq(users.id, assignments.clinicianUserId))
+      .where(and(
+        inArray(assignments.studyId, clocks.map((c) => c.studyId)),
+        inArray(assignments.state, ['offered', 'accepted', 'reading']),
+      ));
+    const holderOf = new Map(held.map((h) => [h.studyId, h]));
+
+    const rules = (await db.select({
+      tenantId: escalationRules.tenantId,
+      priority: escalationRules.priority,
+      stage: escalationRules.stage,
+      atElapsedPct: escalationRules.atElapsedPct,
+      action: escalationRules.action,
+    }).from(escalationRules).where(eq(escalationRules.enabled, true)))
+      .map((row) => ({ ...row, action: row.action as EscalationRule['action'] }));
+
+    // "Late" means the sweep would say something about it: a stage already fired, a
+    // deadline passed, or a stage due on the next pass. A calm clock is not on this board.
+    // ClockLike is the shape the shared rule measures; the board's rows carry a few more
+    // columns for display, so they are adapted rather than assumed compatible.
+    const asClock = (c: typeof clocks[number]): ClockLike => ({
+      id: c.clockId, studyId: c.studyId, tenantId: c.tenantId, priority: c.priority,
+      startedAt: c.startedAt, deadlineAt: c.deadlineAt, stage: c.stage, signedAt: c.signedAt,
+    });
+    const late = clocks.filter((c) => c.stage > 0 || c.breached || isBreached(asClock(c), now)
+      || dueStages(asClock(c), rules, now).length > 0);
+
+    await appendAudit(db, {
+      actorUserId: req.principal!.userId, actorKind: 'human', tenantId,
+      action: 'escalations.read', entity: 'sla_clocks', detail: { open: clocks.length },
+    });
+    res.json({
+      ok: true, generatedAt: now,
+      counts: {
+        open: clocks.length,
+        late: late.length,
+        breached: late.filter((c) => c.breached || isBreached(asClock(c), now)).length,
+        unheld: late.filter((c) => !holderOf.has(c.studyId)).length,
+      },
+      late: late.map((c) => ({
+        clockId: c.clockId,
+        studyId: c.studyId,
+        tenant: c.tenantCode,
+        accession: c.accession,
+        modality: c.modality,
+        subSpecialty: c.subSpecialty,
+        priority: c.priority,
+        deadlineAt: c.deadlineAt,
+        minutesToDeadline: Math.round((c.deadlineAt.getTime() - now.getTime()) / 60_000),
+        elapsedPct: elapsedPct(asClock(c), now),
+        stage: c.stage,
+        lastEscalatedAt: c.lastEscalatedAt,
+        breached: c.breached || isBreached(asClock(c), now),
+        holder: holderOf.get(c.studyId) ?? null,
+      })),
     });
   });
 

@@ -63,6 +63,11 @@ export function auditRowHash(input: {
 
 function canonicalise(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value ?? null);
+  // A Date hashes as its ISO string, because that is what the jsonb column stores and
+  // what a read hands back. Hashing the object itself yields "{}" at write time and a
+  // real string when the verifier recomputes, so the chain broke at the first audit line
+  // that carried a timestamp in its detail — which was the worker's `sla.escalated` row.
+  if (value instanceof Date) return JSON.stringify(value.toISOString());
   if (Array.isArray(value)) return `[${value.map(canonicalise).join(',')}]`;
   const obj = value as Record<string, unknown>;
   return `{${Object.keys(obj).sort().map((k) => `${JSON.stringify(k)}:${canonicalise(obj[k])}`).join(',')}}`;

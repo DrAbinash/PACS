@@ -22,3 +22,6 @@ tmp/
 scripts/validation/out/
 scripts/validation/out-*/
 .tmp-inbox/
+
+# Python bytecode from the validation scripts importing each other.
+__pycache__/

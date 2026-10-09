@@ -3,10 +3,13 @@ import { createWriteStream, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { and, desc, eq, sql } from 'drizzle-orm';
 import type { Db } from '@telrad/db';
-import { uploadBatches, uploadFiles } from '@telrad/db';
+import {
+  appendAudit,
+  uploadBatches,
+  uploadFiles,
+} from '@telrad/db';
 import { cleanText, LIMITS, safeFilename, sniffKind } from '@telrad/shared';
 import { Router } from 'express';
-import { appendAudit } from '../audit.js';
 import { requireUploader, type Ctx } from '../auth.js';
 
 export type UploadCtx = { tenantId: number; siteId: number | null; channel: 'agent' | 'browser'; actorUserId: number | null };

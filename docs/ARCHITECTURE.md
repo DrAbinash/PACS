@@ -52,13 +52,15 @@ the only place a path appears.
   resolve the same tree.
 - Secrets fail closed. `apps/api/src/env.ts` refuses to boot on a placeholder or a
   short value; there is no "warn and continue".
-- `apps/api` is the only writer of clinical state. The worker writes ingest rows
-  and nothing else; the future console reads.
+- `apps/api` is the only writer of clinical state. The worker writes ingest rows, the
+  escalation state of a clock it measured, and audit rows — and it never creates, moves
+  or releases an assignment. Only a reader's own request can put a case on their desk,
+  which is what keeps the dispatcher from becoming a second place where work is assigned.
 - **Green means "will pick this up now", never "has an account".** Presence is a
   heartbeat the open console tab sends every twenty seconds, the state the reader
   declared, and whether their queue has a free slot — all three, computed by one pure
-  function (`packages/shared/src/presence.ts`) that the board and the future
-  dispatcher both call, so they cannot disagree about who is routable. A tab left open
+  function (`packages/shared/src/presence.ts`) that the board and the dispatcher both
+  call, so they cannot disagree about who is routable. A tab left open
   overnight goes red on its own. Amber is deliberately separate from red: a reader at
   capacity and a reader who has gone home are different things to phone about at 2 a.m.
 - Clocks open only for a study that is both linked and complete. A deadline on a
@@ -90,6 +92,40 @@ the only place a path appears.
   deliberately not dispatchable, the routing queue would stop moving while every other
   signal still looked healthy. This was found by running the dispatcher, not by reading
   the code.
+- **Escalation stages are fractions of the window, and widening relaxes capacity and
+  nothing else.** `packages/shared/src/escalation.ts` reads `escalation_rules` by
+  `at_elapsed_pct`, so a center that renegotiates four hours to two does not re-edit
+  three timers, and a tenant's own rows *replace* the platform's rather than adding to
+  them. The only thing `widen_pool` permits is a case going to a reader who is present,
+  covers the study, and is already at capacity. It never reaches a paused reader, never
+  reaches a stale tab, and never reaches a reader whose profile does not list the
+  sub-specialty. Both halves were measured on live infrastructure: the chest film whose
+  only cover had just filled the one-slot queue they declared was offered anyway
+  (`escalate … actions=widen_pool:1`, `dispatch widened=1`), and the spine MRI whose only
+  full cover was paused stayed unheld through the same stage.
+- **A pass catches up; it does not queue.** A case that crossed two thresholds while the
+  worker was stopped fires both stages in the next sweep, lowest first, each with its own
+  `sla.escalated` audit row. A schedule that advances one stage per tick does not report a
+  different story, it just reports it late — and on a clock measured in hours, "late" is
+  the whole point of the rule. `breached` is stamped by a conditional update, so it is
+  written exactly once however many passes follow.
+- **`alert_ops` and `notify_center` are recorded, not sent.** They write an audit row and
+  appear on the operator's late board. There is no pager and no SMS gateway in this
+  repository, and an action named "alert" that silently did nothing is the kind of
+  fiction a contract audit is designed to catch.
+- **A manual assign is a person taking responsibility, and the mismatch is shown.**
+  `POST /v1/assignments` requires a reason, records `escalated_by`, and returns the
+  coverage mismatch in the response *and* in the audit detail rather than treating an
+  override as normal. Measured live: assigning a spine MRI to the chest reader answered
+  201 with `warning: "Dr Chest does not list sub-specialty mr-spine or modality MR"`, and
+  the same study answered 409 `already_assigned` on the second submit.
+- **The chain hashes what the row will read back as.** `canonicalise` in
+  `packages/shared/src/audit.ts` hashes a `Date` in an audit detail as its ISO string,
+  because jsonb stores a string. Hashing it as an object yields `{}` at write time and a
+  real value at verify time, and `verify-audit` broke at row 46 — the first line written
+  by the worker, which was also the first line that carried a timestamp. The api's own
+  rows had never done that, so the trap sat in the code for as long as only one process
+  wrote the chain.
 
 ## Known open items, stated rather than implied
 
@@ -105,12 +141,21 @@ the only place a path appears.
   ~30 call sites, deliberately not done in a hurry. Until it is, `/health/ready` plus a
   restart count is the only evidence, and **any new raw `sql` fragment that takes a
   timestamp must bind `date.toISOString()` with an explicit `::timestamptz` cast.**
-- **Nothing escalates a case nobody took.** `escalation_rules` and
-  `sla_clocks.escalation_stage` exist, `bootstrap` seeds three stages (widen_pool at
-  55 %, alert_ops at 75 %, manual_assign at 92 %), and no code reads them. A study whose
-  only eligible reader has already been asked stays in `/v1/dispatch/unassigned` with
-  `already_offered` as its explanation forever. That is the honest current behaviour —
-  the alternative is a timer that pages somebody on a rule nobody has agreed yet.
+- **A declined case is never asked again, and widening cannot fix that.** Rotation
+  refuses to re-offer a study to a reader who has already been asked, so the chest film
+  a reader sends back with a reason stays in `/v1/dispatch/unassigned` with
+  `already_offered` as its explanation at every stage, up to and including breach. That
+  is deliberate for the automatic path — a case cannot be forced back onto the person who
+  just refused it — and the manual assign exists to be the way out. What is missing is
+  the other way out: nothing re-offers it after the reader's own queue empties, so a
+  decline at 1 a.m. needs a human awake at the board.
+- **A widened offer has no ceiling.** `widen_pool` lets an at-capacity reader take one
+  more case, and in the live run the same chest reader ended up holding three accepted
+  studies against the one-slot queue they had declared — one ordinary offer, one widened
+  offer and one manual assign, each of which checked coverage and presence and none of
+  which checked a limit. An over-capacity queue is a clinical risk and the number needs a
+  stated maximum (one over? two over? never for STAT?) before a real reader is on it.
+  `assignments_live_lock_uq` will happily let it keep happening.
 - **A router mounted at `/v1` guards paths it does not own.** `r.use(requireAuth)`
   inside such a router runs for *every* `/v1/...` request, so a radiologist polling
   `/v1/presence` was answered 403 by the sites router's owner-only check, and an agent
@@ -131,12 +176,14 @@ the only place a path appears.
   REST-pushed file has no `RemoteAET`, so if the label is ever refused the study lands
   in the orphan queue as `site_unresolved` rather than being guessed at; the instance
   is still recorded as `pushed`, because the bytes really are archived.
-- **Priority on the automatic path is inferred, not ordered.** `classifyStudy` reads
-  STAT/URGENT out of DICOM text and the matched order's own `priority` is never
-  consulted, so an urgent order delivered by a center that writes no priority text is
-  clocked as routine — while the *manual* link to that same order clocks it urgent.
-  The two paths disagree today. Decide which one wins before the escalation engine is
-  built on top of either; the candidate-order query does not even select the column.
+- **Priority on the automatic path is inferred, not ordered — and the escalation engine
+  now sits on top of the inferred one.** `classifyStudy` reads STAT/URGENT out of DICOM
+  text and the matched order's own `priority` is never consulted, so an urgent order
+  delivered by a center that writes no priority text is clocked as routine — while the
+  *manual* link to that same order clocks it urgent. Measured in the escalation run:
+  `ACC-ESC-B` was ordered urgent, its study row came out routine, and its window was the
+  routine 240 minutes. The stages that fired on it were the routine stages. Decide which
+  source wins before a center is billed against a clock nobody agreed.
 - **Two tenants claiming one instance is refused, but only proven by unit test.** The
   rule is in `attributeByBatch`; it has not been exercised live, because doing that
   needs a second tenant filing the same pixels.
@@ -189,7 +236,7 @@ schedule, which is why retention is data and not a constant.
 | Component | State |
 | --- | --- |
 | `packages/db` schema (31 tables) + `migrations/0000_*.sql` | **Applied to a real PostgreSQL 16**; 31 tables created in `telrad`, nothing leaked into `public` |
-| `packages/shared` match + classify + two-signature rules + audit chain | Built, 28 assertions passing. Region codes derive from (modality, region); obstetric is tested before abdomen on purpose |
+| `packages/shared` match + classify + two-signature rules + audit chain | Built; the package carries **97 assertions across six files** (order matching, classify + enums + the audit chain in one, presence, the routing rule, the escalation rule, request validation). Region codes derive from (modality, region); obstetric is tested before abdomen on purpose |
 | `apps/api` health, login/session/logout, tenant-scoped study reads, audit read | Built and **exercised over HTTP**: login issued a session cookie, a wrong password got 401, an unknown `state` param got 400, an unauthenticated read got 401 |
 | `apps/api` bootstrap + `verify-audit` | Ran against the test database: owner + tenant + node + catalogs written, audit chain verified `rows=4 broken=0` |
 | `apps/api` order and patient entry, site registration, agent tokens, upload batches, orphan queue | Built and **exercised over HTTP** by `scripts/validation/run-p1-flow.py`, which now drives the agent steps with a token and **no cookie jar** — the first version of that script reused the console session and hid a defect that made the whole upload channel unreachable for an agent |
@@ -200,12 +247,18 @@ schedule, which is why retention is data and not a constant.
 | `compose.yaml`, `infra/caddy/Caddyfile` | `docker compose config` interpolates; **Caddy and the profiles have not been run** |
 | `apps/web` console — the on-panel board | Built and **seen in a browser**: four seeded readers rendered red with "No signal · last signal 3m ago" after their heartbeats stopped, then Dr Anitha flipped to green "On panel" and sorted to the top **without a page reload** on the five-second refresh. Verified through the DOM (structure, counts, per-row reason); a screenshot was not available from this browser session, so the visual layout has not been reviewed by a human eye |
 | `apps/api` presence endpoints | **Proven live**: `POST /presence/heartbeat` → green; a heartbeat *after* declaring `paused` stays amber, so presence cannot be refreshed back into availability; a reader holding one case with `max_queue_size = 1` → amber `at_cap`; `last_seen_at` backdated five minutes → red `idle` while `reader_availability.state` still reads `receiving`, which is the whole point; no session → 401, a non-reader session → 403 |
-| Routing rule (`packages/shared/src/dispatch.ts`) | Built, 21 assertions: colour, tenant reach, coverage (empty = nothing, `*` = everything), night window against the tenant's own zone, capacity, and rotation past readers already asked. Ties break on fewest open cases, then roster, then whoever waited longest. `readerPresence` is the same function the board calls, so a reader the board paints amber is not offered work |
+| Routing rule (`packages/shared/src/dispatch.ts`) | Built, 26 assertions: colour, tenant reach, coverage (empty = nothing, `*` = everything), night window against the tenant's own zone, capacity, rotation past readers already asked, and the widened path (at-cap only — a paused reader and a dead tab are never widened, and a reader without cover is never reached by it). Ties break on fewest open cases, then roster, then whoever waited longest. `readerPresence` is the same function the board calls, so a reader the board paints amber is not offered work |
 | `apps/worker` dispatch sweep + offer expiry | **Proven live** with three studies on the real upload channel and five seeded readers: the STAT head CT went to Dr Green, the routine head CT to Dr Second *in the same tick* (Green was already holding one, and the sweep counts the offers it has just made), the chest to Dr Chest whom nobody else covers; Dr Paused (amber) and Dr Gone (declared `receiving`, no heartbeat for three hours) received nothing. A lapsed offer was withdrawn and rotated to Green as `attempt_no = 2` |
 | `apps/api` accept / decline / my-work / unassigned | **Proven live over HTTP and in the browser**: accept returned a one-time lock token, wrote `assignments.accepted_at` *and* `sla_clocks.accepted_at`; a second accept got 409 `not_offered`; another reader's assignment answered 404, not 403; decline without a reason got 422 and with one released the case. `GET /v1/dispatch/unassigned` named the real gap on the declined chest study: `Dr Chest — already_offered`. Dr Second accepted through the console's own Accept button and the row moved to `accepted` |
 | Reader provisioning (`cli add-reader`) | Built and used by the verification. Requires coverage lists, and refuses a stray argument: an unquoted `--name Dr Second` used to create an account called "Dr", which then won the alphabetical tie-break for the STAT case. Real routing bug, found through a real CLI trap |
 | Console worklist for the reader | Built and **seen in the browser**: "Your cases" renders the live offer with Accept and Decline, a per-second countdown to the lapse, and the patient/modality/accession line; Accept was clicked and the database row confirmed `accepted` with a lock token. Layout has not been reviewed as an image — this browser gives no viewport |
-| Viewer, escalation execution, reports, delivery, billing | **Not built.** The dispatcher routes, the reader accepts, and there is no image viewer to read the case in yet; nothing pages a person when a case cannot be routed |
+| Viewer, reports, delivery, billing | **Not built.** The dispatcher routes, the reader accepts, and there is no image viewer to read the case in yet — which means a reader can accept a study they currently have no way to open |
+| Escalation rule (`packages/shared/src/escalation.ts`) | Built, 16 assertions: `elapsedPct` (unclamped above 100, zero-window measured as 100), `rulesFor` (a tenant's rows **replace** the platform's for that priority, they do not merge), `dueStages` (nothing fires on a signed clock, every missed stage returns in one pass), `widenStage` |
+| `apps/worker` escalation pass | **Proven live on the real clocks.** Crossing 55 % produced `escalate checked=3 staged=2 breached=0 actions=widen_pool:2` and one `sla.escalated` row per clock with `actor_kind = system`; 80 % produced `alert_ops:1`; pushing a case from 65 % straight to 98 % fired **stages 2 and 3 in one pass** with two audit rows, and the deadline pass reported `breached=2`. An immediate second pass reported nothing, and the breach count in `audit_log` is still one row per clock |
+| The widened offer, measured | The chest study whose only cover had just filled their one-slot queue was offered anyway (`dispatch widened=1`) and they accepted, taking the queue to **2 of 1**; the manual assign below made it 3 of 1, which is the open item rather than a surprise. The spine MRI whose only full cover was *paused* stayed unheld at the same stage: `poolWidened=true, status=blocked, nearest=Dr Paused (not_routable)`. Dr Green, green and idle for the whole run with the wrong lists, was never offered anything at any stage |
+| `apps/api` late board and manual assign | **Proven live over HTTP**: `GET /v1/escalations` listed only clocks with something to say (`{open:3, late:0}` before any stage fired, `{open:3, late:2, breached:2, unheld:0}` after), and each row carried `% of the window`, the stage, and the named holder with their state. `POST /v1/assignments` refused a non-reader with 404 and a missing reason with 422, then assigned the MRI to the chest reader as 201 with `warning: "Dr Chest does not list sub-specialty mr-spine or modality MR"`, refused the duplicate as 409 `already_assigned`, and the board then named him as the holder |
+| Audit chain written by **two processes** | The api writes human rows and the worker writes system rows into one chain. `verify-audit` on the finished run: `audit rows=125 broken=0`. It did **not** verify at first — `hash mismatch at id=46`, the worker's first escalation row, because a `Date` in an audit detail hashed as `{}` and read back as a string. Fixed in `canonicalise`, with a test that hashes the write-time object and the read-back row to the same value |
+| Console "Waiting" card | Built and **seen in the browser** as the owner: two overdue rows painted breached (`overdue by 7 min`, `499% of the window · stage 3`, `Dr Chest — accepted`) under the late table, and the "Cannot route automatically" section naming `study 10 · stage 0 · nearest: Dr Chest (queue_full)`. Header counts matched `/v1/panel` exactly (`0 routable, 2 not routable, 1 off`). Layout has not been reviewed as an image — this browser gives no viewport, and its hidden-tab timer throttling means a scripted check must press Refresh rather than trust the poll |
 
 Nothing in this repository has processed a patient study. The studies it has
 processed were invented by `scripts/validation/send-test-study.py`.

@@ -1,7 +1,7 @@
 import { and, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import type { Db } from './index.js';
 import {
-  assignments, clinicianProfiles, readerAvailability, rosters, studies, tenants, users,
+  assignments, clinicianProfiles, readerAvailability, rosters, slaClocks, studies, tenants, users,
 } from './schema.js';
 
 // Both the dispatcher's sweep and the console's "why is this nobody's case" read need
@@ -17,6 +17,11 @@ export type DispatchableStudyRow = {
   modalityCode: string | null;
   tenantTimezone: string;
   receivedAt: Date;
+  /** How far this case's clock has already been escalated. Zero when no stage has fired,
+   * and also when there is no clock at all — an unlinked study is not measured, and the
+   * queue only ever contains linked ones. */
+  escalationStage: number;
+  deadlineAt: Date | null;
 };
 
 export type PanelReaderRow = {
@@ -47,8 +52,11 @@ export async function dispatchableStudies(
     modalityCode: studies.modalityCode,
     tenantTimezone: tenants.timezone,
     receivedAt: studies.receivedAt,
+    escalationStage: slaClocks.escalationStage,
+    deadlineAt: slaClocks.deadlineAt,
   }).from(studies)
     .innerJoin(tenants, eq(tenants.id, studies.tenantId))
+    .leftJoin(slaClocks, eq(slaClocks.studyId, studies.id))
     .where(and(
       eq(studies.linkState, 'linked'),
       isNotNull(studies.orderId),
@@ -78,7 +86,12 @@ export async function dispatchableStudies(
   // decide to offer the same study end with one insert and one no-op.
   const rows = await query;
 
-  return rows.map((row) => ({ ...row, tenantId: row.tenantId!, orderId: row.orderId! }));
+  return rows.map((row) => ({
+    ...row,
+    tenantId: row.tenantId!,
+    orderId: row.orderId!,
+    escalationStage: row.escalationStage ?? 0,
+  }));
 }
 
 export async function panelReaders(db: Db, tenantIds: number[], now: Date): Promise<PanelReaderRow[]> {

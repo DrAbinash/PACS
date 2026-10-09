@@ -1,10 +1,11 @@
-import { and, eq, gte, inArray, lte, or, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import type { Db } from '@telrad/db';
 import {
-  assignments, dispatchableStudies, ingestCursors, ingestEvents, offerHistory, orders, panelReaders, patients, slaClocks,
-  studies, subSpecialties, tenantSites, uploadBatches, uploadFiles,
+  appendAudit, assignments, dispatchableStudies, escalationRules, ingestCursors, ingestEvents, offerHistory, orders,
+  panelReaders, patients, slaClocks, studies, subSpecialties, tenantSites, uploadBatches, uploadFiles,
 } from '@telrad/db';
-import { LIMITS, type Priority } from '@telrad/shared';
+import { LIMITS, type EscalationRule, type Priority } from '@telrad/shared';
+import type { EscalatableClock, EscalationPort } from './escalate.js';
 import type { DispatchPort } from './dispatch.js';
 import type { OrderCandidate, StorePort } from './ingest.js';
 import type { InboxStore } from './inbox.js';
@@ -259,6 +260,10 @@ export function createDispatchStore(db: Db): DispatchPort {
       return panelReaders(db, tenantIds, now);
     },
 
+    async rules() {
+      return enabledRules(db);
+    },
+
     async offersByStudy(studyIds) {
       return offerHistory(db, studyIds);
     },
@@ -329,5 +334,66 @@ export function createInboxStore(db: Db): InboxStore {
         .set({ status, processedAt: new Date(), lastError: error })
         .where(eq(uploadBatches.id, batchId));
     },
+  };
+}
+
+export async function enabledRules(db: Db): Promise<EscalationRule[]> {
+  const rows = await db.select({
+    tenantId: escalationRules.tenantId,
+    priority: escalationRules.priority,
+    stage: escalationRules.stage,
+    atElapsedPct: escalationRules.atElapsedPct,
+    action: escalationRules.action,
+  }).from(escalationRules).where(eq(escalationRules.enabled, true))
+    .orderBy(escalationRules.tenantId, escalationRules.priority, escalationRules.stage);
+  return rows.map((row) => ({ ...row, action: row.action as EscalationRule['action'] }));
+}
+
+export function createEscalationStore(db: Db): EscalationPort {
+  return {
+    async openClocks(limit) {
+      // Deliberately not filtered on `breached`: a case that has already blown its
+      // deadline still has stages left to fire, and stopping the sweep at the breach is
+      // how a product ends up with a breach nobody was ever told about.
+      const rows = await db.select({
+        id: slaClocks.id,
+        studyId: slaClocks.studyId,
+        tenantId: slaClocks.tenantId,
+        priority: slaClocks.priority,
+        startedAt: studies.receivedAt,
+        deadlineAt: slaClocks.deadlineAt,
+        stage: slaClocks.escalationStage,
+        signedAt: slaClocks.signedAt,
+        accessionNumber: studies.accessionNumber,
+      }).from(slaClocks)
+        .innerJoin(studies, eq(studies.id, slaClocks.studyId))
+        .where(isNull(slaClocks.deliveredAt))
+        .orderBy(slaClocks.deadlineAt)
+        .limit(limit);
+
+      return rows.map((row) => ({
+        ...row,
+        priority: row.priority as EscalatableClock['priority'],
+        accessionNumber: row.accessionNumber ?? null,
+      })) satisfies EscalatableClock[];
+    },
+
+    rules: () => enabledRules(db),
+
+    async applyStage(clockId, stage, now) {
+      await db.update(slaClocks)
+        .set({ escalationStage: stage, lastEscalatedAt: now })
+        .where(eq(slaClocks.id, clockId));
+    },
+
+    async markBreached(clockId, now) {
+      const rows = await db.update(slaClocks)
+        .set({ breached: true, breachedAt: now })
+        .where(and(eq(slaClocks.id, clockId), eq(slaClocks.breached, false)))
+        .returning({ id: slaClocks.id });
+      return rows.length > 0;
+    },
+
+    async record(input) { await appendAudit(db, input); },
   };
 }

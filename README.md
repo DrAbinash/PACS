@@ -4,14 +4,18 @@ Multi-center tele-radiology service: diagnostic centers push studies in, cases
 distribute to contracted radiologists reading from anywhere, reports come back
 signed by two names and are billed per center.
 
-**Status: P1 channels proven; the panel routes.** A study can arrive by C-STORE or by
-an upload batch from a center's agent token, be attributed to its tenant, linked to
-its order, and carry an SLA clock; a study that matches nothing waits in the orphan
-queue where a person can link it. The console shows which readers are routable right
-now, and the dispatcher offers a case **only** to a green reader whose profile covers
-it — accept it, decline it with a reason, or let the offer lapse and rotate. There is
-still no viewer, no report and no money, and nothing pages a person when a case cannot
-be routed. Nothing in here has received a patient study. The inventory at the end of
+**Status: P1 channels proven; the panel routes and the clock escalates.** A study can
+arrive by C-STORE or by an upload batch from a center's agent token, be attributed to its
+tenant, linked to its order, and carry an SLA clock; a study that matches nothing waits in
+the orphan queue where a person can link it. The console shows which readers are routable
+right now, and the dispatcher offers a case **only** to a green reader whose profile covers
+it — accept it, decline it with a reason, or let the offer lapse and rotate. When a clock
+starts running out, its stages fire: the pool widens onto a reader who is present and full
+and onto nobody else, the late board names the case and whoever holds it, and an operator
+can put it on a named reader by hand with a reason that gets audited. There is still no
+viewer, no report and no money, and nothing pages a person when a case cannot be routed —
+"alert" today means an audit row and the board. Nothing in here has received a patient
+study. The inventory at the end of
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) is the honest state.
 
 Standalone product. It is not a CARE ERP module, it does not call the FutureKind
@@ -26,7 +30,7 @@ borrowed thing is deployment technique: Orthanc + OHIF + Synology Docker, the wa
 | Ingest edge | center's modality or uploader | Orthanc C-STORE, watched folders, browser upload |
 | Worklist | radiologist | offers with a padlock, accept or decline-with-a-reason, lapse countdown; no viewer, no auto-next yet |
 | Report desk | radiologist, reviewer | draft → sign → countersign → deliver → amend |
-| Console | owner, center admin | tenants, tariffs, rosters, QC, invoices, payouts |
+| Console | owner, center admin | who is routable, what is running out and who holds it, what cannot be routed and why, manual assign; tenants, tariffs, rosters, QC, invoices, payouts |
 
 ## Layout
 

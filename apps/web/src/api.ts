@@ -73,6 +73,38 @@ export type WorkCase = {
   waitingMinutes: number;
 };
 
+export type LateCase = {
+  clockId: number;
+  studyId: number;
+  tenant: string | null;
+  accession: string | null;
+  modality: string | null;
+  subSpecialty: string | null;
+  priority: 'stat' | 'urgent' | 'routine';
+  deadlineAt: string;
+  minutesToDeadline: number;
+  elapsedPct: number;
+  stage: number;
+  lastEscalatedAt: string | null;
+  breached: boolean;
+  holder: { studyId: number; userId: number; name: string; state: string } | null;
+};
+
+export type BlockedCase = {
+  studyId: number;
+  tenantId: number;
+  priority: 'stat' | 'urgent' | 'routine';
+  modality: string | null;
+  subSpecialty: string | null;
+  waitingMinutes: number;
+  escalationStage: number;
+  elapsedPct: number | null;
+  poolWidened: boolean;
+  status: 'waiting_for_sweep' | 'blocked';
+  blockedBecause: string | null;
+  nearestReader: { userId: number; name: string; missing: string[] } | null;
+};
+
 export const api = {
   session: () => call<Session>('/v1/auth/session'),
   login: (email: string, password: string) =>
@@ -91,4 +123,9 @@ export const api = {
     call<{ ok: boolean; studyId: number }>(`/v1/assignments/${id}/decline`, {
       method: 'POST', body: JSON.stringify({ reason }),
     }),
+  escalations: () =>
+    call<{ late: LateCase[]; counts: { open: number; late: number; breached: number; unheld: number } }>(
+      '/v1/escalations'),
+  blocked: () =>
+    call<{ unassigned: BlockedCase[]; counts: { unassigned: number; blocked: number } }>('/v1/dispatch/unassigned'),
 };

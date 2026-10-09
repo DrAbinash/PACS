@@ -1,9 +1,12 @@
 import { desc, eq, sql } from 'drizzle-orm';
 import type { Db } from '@telrad/db';
-import { apiTokens, tenantSites } from '@telrad/db';
+import {
+  apiTokens,
+  appendAudit,
+  tenantSites,
+} from '@telrad/db';
 import { cleanText, hashToken, newToken } from '@telrad/shared';
 import { Router } from 'express';
-import { appendAudit } from '../audit.js';
 import { requireAuth, requireRole, scoped, type Ctx } from '../auth.js';
 
 export function sitesRouter(db: Db): Router {

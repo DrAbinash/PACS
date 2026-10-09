@@ -1,6 +1,7 @@
 import { desc } from 'drizzle-orm';
-import { type Db, auditLog } from '@telrad/db';
 import { auditRowHash } from '@telrad/shared';
+import type { Db } from './index.js';
+import { auditLog } from './schema.js';
 
 export type AuditInput = {
   actorUserId: number | null;
@@ -12,9 +13,14 @@ export type AuditInput = {
   detail?: unknown;
 };
 
-// Reads of patient data are audited, not only writes. The question a regulator or
-// a patient asks is "who looked at this study", and an append-only write log does
-// not answer it.
+// One implementation of the hash chain, here, because both the api (a person did
+// something) and the worker (the clock ran out) have to write into it. Two copies of
+// `prevHash` arithmetic is how a chain ends up verifying in one process and breaking in
+// the other — and the chain is the thing an investigator reads.
+//
+// Reads of patient data are audited, not only writes. The question a regulator or a
+// patient asks is "who looked at this study", and an append-only write log does not
+// answer it.
 export async function appendAudit(db: Db, input: AuditInput): Promise<string> {
   const [last] = await db
     .select({ rowHash: auditLog.rowHash })

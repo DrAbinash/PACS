@@ -1,9 +1,20 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { api, ApiError, type Panel, type PanelRow, type PresenceColor, type Session, type WorkCase } from './api';
+import {
+  api,
+  ApiError,
+  type BlockedCase,
+  type LateCase,
+  type Panel,
+  type PanelRow,
+  type PresenceColor,
+  type Session,
+  type WorkCase,
+} from './api';
 
 const HEARTBEAT_MS = 20_000;
 const REFRESH_MS = 5_000;
 const READER_ROLES = ['radiologist', 'reviewer'];
+const OPERATOR_ROLES = ['owner', 'console'];
 
 type Mine = { color: PresenceColor; code: string; label: string; routable: boolean; openCases: number; maxQueueSize: number };
 
@@ -144,6 +155,87 @@ function Worklist({ onChanged }: { onChanged: () => void }) {
   );
 }
 
+// The operator's other half of the board: not who is free, but what is running out and
+// whether the system has done anything about it yet. A case that cannot be routed shows
+// the closest reader and the reason they were skipped, because "unassigned" on its own is
+// not an answer anyone can act on at 2 a.m.
+function Waiting({ show }: { show: boolean }) {
+  const [late, setLate] = useState<LateCase[]>([]);
+  const [blocked, setBlocked] = useState<BlockedCase[]>([]);
+  const [unheld, setUnheld] = useState(0);
+
+  useEffect(() => {
+    if (!show) return;
+    let live = true;
+    const load = async () => {
+      try {
+        const [e, b] = await Promise.all([api.escalations(), api.blocked()]);
+        if (!live) return;
+        setLate(e.late);
+        setUnheld(e.counts.unheld);
+        setBlocked(b.unassigned.filter((u) => u.status === 'blocked'));
+      } catch {
+        // The panel already carries the "feed lost" banner; a stale waiting list should
+        // not shout twice about the same outage.
+      }
+    };
+    void load();
+    const timer = setInterval(() => void load(), REFRESH_MS);
+    return () => { live = false; clearInterval(timer); };
+  }, [show]);
+
+  if (!show || (late.length === 0 && blocked.length === 0)) return null;
+
+  return (
+    <div className="card">
+      <h2>Waiting</h2>
+      {late.length > 0 && (
+        <table>
+          <thead>
+            <tr><th>Case</th><th>Priority</th><th>Deadline</th><th>Held by</th></tr>
+          </thead>
+          <tbody>
+            {late.map((c) => (
+              <tr key={c.clockId} className={c.breached ? 'breached' : undefined}>
+                <td>
+                  <strong>{c.accession ?? `study ${c.studyId}`}</strong>
+                  <div className="sub">{c.tenant} · {c.modality} {c.subSpecialty}</div>
+                </td>
+                <td><span className={`priority ${c.priority}`}>{c.priority}</span></td>
+                <td>
+                  {c.breached
+                    ? <span className="state red">overdue by {Math.abs(c.minutesToDeadline)} min</span>
+                    : <span className={c.minutesToDeadline < 60 ? 'state amber' : 'sub'}>{c.minutesToDeadline} min left</span>}
+                  <div className="sub">{c.elapsedPct}% of the window · stage {c.stage}{c.stage > 0 ? '' : ' (nothing fired)'}</div>
+                </td>
+                <td>{c.holder ? `${c.holder.name} — ${c.holder.state}` : <span className="state red">nobody ({unheld} such)</span>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {blocked.length > 0 && (
+        <>
+          <h3 className="sub">Cannot route automatically</h3>
+          {blocked.map((b) => (
+            <div className="workcase" key={b.studyId}>
+              <span className={`priority ${b.priority}`}>{b.priority}</span>
+              <div className="who">
+                <strong>study {b.studyId}</strong>
+                <div className="sub">{b.modality} {b.subSpecialty} · waiting {b.waitingMinutes} min · stage {b.escalationStage}</div>
+                <div className="sub">
+                  nearest: {b.nearestReader ? `${b.nearestReader.name} (${b.nearestReader.missing.join(', ')})` : 'nobody on the panel'}
+                  {b.poolWidened && ' · pool widened'}
+                </div>
+              </div>
+            </div>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
 function Row({ row, me }: { row: PanelRow; me: boolean }) {
   const why = row.code === 'idle' || row.code === 'signed_out'
     ? `last signal ${ago(row.sinceSeenSeconds)} ago`
@@ -188,6 +280,7 @@ export default function App() {
   const [busy, setBusy] = useState(false);
 
   const isReader = session !== null && READER_ROLES.includes(session.user.role);
+  const isOperator = session !== null && OPERATOR_ROLES.includes(session.user.role);
 
   useEffect(() => {
     api.session().then(setSession).catch(() => setSession(null)).finally(() => setBooting(false));
@@ -298,6 +391,8 @@ export default function App() {
         )}
 
         {isReader && <Worklist onChanged={() => { void refresh(); }} />}
+
+        {isOperator && <Waiting show={isOperator} />}
 
         {counts.green === 0 && !feedError && (
           <div className="banner">Nobody is routable right now. Anything waiting will wait.</div>

@@ -1,9 +1,13 @@
 import { and, desc, eq, or, sql } from 'drizzle-orm';
 import type { Db } from '@telrad/db';
-import { orders, patients, tenantSites } from '@telrad/db';
+import {
+  appendAudit,
+  orders,
+  patients,
+  tenantSites,
+} from '@telrad/db';
 import { cleanText, normaliseMrn, validateOrderInput, validatePatientInput } from '@telrad/shared';
 import { Router } from 'express';
-import { appendAudit } from '../audit.js';
 import { requireAuth, scoped, scopeTenant, type Ctx } from '../auth.js';
 
 // The tenant a write lands in is decided here, once: a center role is pinned to its

@@ -118,6 +118,18 @@ describe('audit chain', () => {
     expect(auditRowHash({ ...row, detail: { a: [2, { c: 3, d: 4 }], b: 1 } })).toEqual(auditRowHash(row));
   });
 
+  it('hashes a Date inside the detail as the string the row reads back as', () => {
+    // The writer holds a Date and the verifier reads jsonb, which gives back an ISO
+    // string. Hashing the Date as an object yields "{}" on one side and a real value on
+    // the other, and the chain breaks at the first timestamped detail line — which is
+    // exactly what the worker's first `sla.escalated` row did.
+    const written = { ...row, detail: { deadlineAt: new Date('2026-10-08T10:00:00Z') } };
+    const stored = { ...row, detail: { deadlineAt: '2026-10-08T10:00:00.000Z' } };
+    expect(auditRowHash(written)).toEqual(auditRowHash(stored));
+    expect(auditRowHash({ ...row, detail: { deadlineAt: new Date('2026-10-08T10:00:01Z') } }))
+      .not.toEqual(auditRowHash(stored));
+  });
+
   it('changes when any signed field changes, including the previous hash', () => {
     expect(auditRowHash({ ...row, entityId: '18' })).not.toEqual(auditRowHash(row));
     expect(auditRowHash({ ...row, prevHash: 'other' })).not.toEqual(auditRowHash(row));

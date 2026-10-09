@@ -165,6 +165,46 @@ describe('pickReader', () => {
   });
 });
 
+// Widening is the one thing an escalation stage is allowed to do to the routing rule, so
+// its edges are the ones that matter: it must reach a reader who is busy, and never one
+// who is absent, declined, or clinically out of scope.
+describe('pickReader under widen_pool', () => {
+  const full = reader({ userId: 51, name: 'Dr Full', openCases: 2, maxQueueSize: 2 });
+
+  it('gives the case to a full reader once the pool widens', () => {
+    const d = pickReader(study(), [full], { now: DAY, allowAtCap: true });
+    expect(d.chosenUserId).toBe(51);
+    expect(d.considered[0]).toMatchObject({ widened: true, rejectedFor: [], presenceCode: 'at_cap' });
+  });
+
+  it('still refuses a reader who paused, because that is a person saying no', () => {
+    const d = pickReader(study(), [reader({ userId: 52, declaredState: 'paused' })], { now: DAY, allowAtCap: true });
+    expect(d.chosenUserId).toBeNull();
+    expect(reasons(d, 52)).toContain('not_routable');
+  });
+
+  it('still refuses a reader whose tab died, because widening cannot make them present', () => {
+    const d = pickReader(study(), [reader({ userId: 53, lastSeenAt: seen(60 * 60 * 4) })], { now: DAY, allowAtCap: true });
+    expect(d.chosenUserId).toBeNull();
+  });
+
+  it('still refuses a full reader who does not cover the case, because coverage is not a capacity question', () => {
+    const d = pickReader(study({ subSpecialtyCode: 'mr-spine', modalityCode: 'MR' }),
+      [reader({ userId: 54, openCases: 2, maxQueueSize: 2 })], { now: DAY, allowAtCap: true });
+    expect(d.chosenUserId).toBeNull();
+    expect(reasons(d, 54)).toContain('no_subspecialty_cover');
+  });
+
+  it('prefers a reader with a free slot over a widened one', () => {
+    const d = pickReader(study(), [
+      full,
+      reader({ userId: 55, name: 'Zoe Free', openCases: 0, maxQueueSize: 2 }),
+    ], { now: DAY, allowAtCap: true });
+    expect(d.chosenUserId).toBe(55);
+    expect(d.eligible).toEqual([55, 51]);
+  });
+});
+
 describe('tzOffsetMinutes', () => {
   it('is east-positive for India, which is what isNight expects', () => {
     expect(tzOffsetMinutes('Asia/Kolkata', DAY)).toBe(330);

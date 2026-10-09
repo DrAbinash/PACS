@@ -264,6 +264,30 @@ has to be true of it:
   `study_not_complete` for more than a few minutes, that re-check is what to look at
   first.
 
+What has to be true when a clock starts running out. `scripts/validation/run-dispatch-flow.py`
+and `run-escalation-flow.py` drive both halves over HTTP; the escalation one moves clocks by
+**shortening the deadline**, never by backdating `received_at`, because a tighter contract is
+the real cause and `received_at` is a fact about the scanner:
+
+- a case whose only eligible reader is already **at capacity** is offered to them anyway once
+  its clock passes the `widen_pool` stage, and the worker says so out loud:
+  `escalate … actions=widen_pool:1` followed by `dispatch widened=1`;
+- a paused reader, a stale tab, or a reader whose profile does not cover the study is
+  **never** reached by that stage. Test it with a study nobody covers: it must stay `blocked`
+  with `poolWidened: true` at every stage, and the reason shown must be one widening cannot
+  fix;
+- stages catch up. A case that crossed two thresholds while the worker was down must write
+  both `sla.escalated` rows in one pass, and `sla.breached` exactly once however many passes
+  follow — count them, do not assume: `select detail->>'accession', count(*) from
+  telrad.audit_log where action = 'sla.breached' group by 1;`
+- the operator's late board (`GET /v1/escalations`, the "Waiting" card) must agree with the
+  sweep. A clock at stage 0 with time left must **not** appear on it; a case nobody holds
+  appears with `holder: null` and the count of such cases;
+- a manual assign is a person, not the router. `POST /v1/assignments` refuses without a
+  reason, and when the target does not list the sub-specialty it succeeds *and* says so
+  (`warning: "… does not list sub-specialty mr-spine or modality MR"`) with the same list in
+  the audit row.
+
 ## 9. Prove the negative cases before trusting the pipeline
 
 ```bash
@@ -286,11 +310,17 @@ this deployment holds test data only.
 
 ## What is not here yet
 
-The console's first screen is here — the on-panel board that colours readers green,
-amber and red, and the heartbeat that keeps them that way. The worklist, the viewer,
-assignment and escalation, report authoring, billing and HL7 are not. The upload
-*endpoints* exist and are proven; the *agent* that a center installs on its modality
+Built and proven on test data: the on-panel board and its heartbeat, the dispatcher that
+offers a case only to a green reader who covers it, the reader's own worklist with accept
+and decline, the escalation stages that widen the pool and stamp a breach, the operator's
+late board, and manual assign with its reason and its reported coverage mismatch.
+
+Not built: the **viewer** — a reader can accept a study today and has no way to open it,
+which is the next thing standing between this and a working night shift. Also missing:
+report authoring and the two-signature flow, delivery back to the center, billing and
+payouts, and any pager or SMS — `alert_ops` and `notify_center` are recorded, not sent.
+The upload *endpoints* exist and are proven; the *agent* a center installs on its modality
 PC to call them does not, so today that channel only works for a browser upload or a
-script. README at the root lists the phase plan; docs/ARCHITECTURE.md states what
-exists, including what the panel does not yet do: **nothing consumes the green answer
-until the dispatcher is built.**
+script. README at the root lists the phase plan; docs/ARCHITECTURE.md states what exists,
+including the two open routing gaps it names: **a declined case is never asked again** and
+**a widened offer has no ceiling**.

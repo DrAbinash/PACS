@@ -58,6 +58,9 @@ export type ConsideredReader = {
   /** Present for every reader who was reachable enough to be scored. */
   presenceCode: string | null;
   rejectedFor: RejectReason[];
+  /** True when the reader is over their normal capacity and was let in only because the
+   * case's clock reached the widen-pool stage. */
+  widened: boolean;
 };
 
 // A decision cannot be both. Encoding it as a union means a caller that reads
@@ -94,7 +97,7 @@ export function tzOffsetMinutes(timeZone: string, at: Date): number {
 
 // Empty means no coverage, not unlimited coverage. A profile nobody filled in must not
 // end up reading a spine MRI because the code fell through to a permissive default.
-function covers(codes: string[], needed: string | null): boolean {
+export function coversCode(codes: string[], needed: string | null): boolean {
   if (needed === null) return true;
   return codes.includes(ALL_CODES) || codes.includes(needed);
 }
@@ -102,7 +105,7 @@ function covers(codes: string[], needed: string | null): boolean {
 export function pickReader(
   study: DispatchStudy,
   candidates: ReaderCandidate[],
-  opts: { now: Date; alreadyOfferedTo?: readonly number[] },
+  opts: { now: Date; alreadyOfferedTo?: readonly number[]; allowAtCap?: boolean },
 ): RoutingDecision {
   const offered = new Set(opts.alreadyOfferedTo ?? []);
   const night = isNight(opts.now, study.tenantTzOffsetMinutes);
@@ -123,11 +126,15 @@ export function pickReader(
       openCases: reader.openCases,
       maxQueueSize: reader.maxQueueSize,
     });
-    if (!presence.routable) {
+    // Widening admits a reader who is *present and full*, which is the only amber that
+    // means "busy" rather than "unreachable" or "declined". A paused reader stays
+    // untouched and a stale tab is still a dead tab.
+    const widened = !presence.routable && presence.code === 'at_cap' && opts.allowAtCap === true;
+    if (!presence.routable && !widened) {
       rejectedFor.push(presence.code === 'at_cap' ? 'queue_full' : 'not_routable');
     }
-    if (!covers(reader.subspecialtyCodes, study.subSpecialtyCode)) rejectedFor.push('no_subspecialty_cover');
-    if (!covers(reader.modalityCodes, study.modalityCode)) rejectedFor.push('no_modality_cover');
+    if (!coversCode(reader.subspecialtyCodes, study.subSpecialtyCode)) rejectedFor.push('no_subspecialty_cover');
+    if (!coversCode(reader.modalityCodes, study.modalityCode)) rejectedFor.push('no_modality_cover');
     if (night && !reader.acceptsNight) rejectedFor.push('no_night_cover');
 
     considered.push({
@@ -137,6 +144,7 @@ export function pickReader(
       maxQueueSize: reader.maxQueueSize,
       presenceCode: presence.code,
       rejectedFor,
+      widened,
     });
     if (rejectedFor.length === 0) eligible.push(reader);
   }

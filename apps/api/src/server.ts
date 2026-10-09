@@ -1,4 +1,7 @@
-import { assertMigrated, openDb } from '@telrad/db';
+import {
+  assertMigrated,
+  openDb,
+} from '@telrad/db';
 import { createApp } from './app.js';
 import { loadEnv } from './env.js';
 import { createOrthancClient } from './orthanc.js';
