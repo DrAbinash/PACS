@@ -25,8 +25,9 @@ jobs:
       TR_DB_URL: postgresql://telrad:ci-only-not-a-secret@127.0.0.1:5432/telrad
     steps:
       - uses: actions/checkout@v4
+      # No version input: action-setup errors outright when both it and the
+      # packageManager field specify pnpm, and the field is the single source.
       - uses: pnpm/action-setup@v4
-        with: { version: 9 }
       - uses: actions/setup-node@v4
         with:
           node-version: 22
