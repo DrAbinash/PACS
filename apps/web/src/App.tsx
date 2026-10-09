@@ -11,6 +11,8 @@ import {
   type WorkCase,
 } from './api';
 
+import Viewer from './Viewer';
+
 const HEARTBEAT_MS = 20_000;
 const REFRESH_MS = 5_000;
 const READER_ROLES = ['radiologist', 'reviewer'];
@@ -55,7 +57,7 @@ function Login({ onSignedIn }: { onSignedIn: (s: Session) => void }) {
   );
 }
 
-function Worklist({ onChanged }: { onChanged: () => void }) {
+function Worklist({ onChanged, onOpen }: { onChanged: () => void; onOpen: (studyId: number) => void }) {
   const [cases, setCases] = useState<WorkCase[]>([]);
   const [declining, setDeclining] = useState<number | null>(null);
   const [reason, setReason] = useState('');
@@ -139,6 +141,10 @@ function Worklist({ onChanged }: { onChanged: () => void }) {
                 <button onClick={() => { setDeclining(c.assignmentId); setReason(''); }}>Decline</button>
               </span>
             )}
+            {/* Offered as well as held: looking is how a reader decides whether to accept,
+                and an accept that had to be blind would be the one thing the padlock rule
+                is not supposed to allow. */}
+            <button onClick={() => onOpen(c.studyId)}>Open</button>
             {declining === c.assignmentId && (
               <span className="acts">
                 <input placeholder="why (required)" value={reason}
@@ -159,7 +165,7 @@ function Worklist({ onChanged }: { onChanged: () => void }) {
 // whether the system has done anything about it yet. A case that cannot be routed shows
 // the closest reader and the reason they were skipped, because "unassigned" on its own is
 // not an answer anyone can act on at 2 a.m.
-function Waiting({ show }: { show: boolean }) {
+function Waiting({ show, onOpen }: { show: boolean; onOpen: (studyId: number) => void }) {
   const [late, setLate] = useState<LateCase[]>([]);
   const [blocked, setBlocked] = useState<BlockedCase[]>([]);
   const [unheld, setUnheld] = useState(0);
@@ -192,7 +198,7 @@ function Waiting({ show }: { show: boolean }) {
       {late.length > 0 && (
         <table>
           <thead>
-            <tr><th>Case</th><th>Priority</th><th>Deadline</th><th>Held by</th></tr>
+            <tr><th>Case</th><th>Priority</th><th>Deadline</th><th>Held by</th><th /></tr>
           </thead>
           <tbody>
             {late.map((c) => (
@@ -209,6 +215,10 @@ function Waiting({ show }: { show: boolean }) {
                   <div className="sub">{c.elapsedPct}% of the window · stage {c.stage}{c.stage > 0 ? '' : ' (nothing fired)'}</div>
                 </td>
                 <td>{c.holder ? `${c.holder.name} — ${c.holder.state}` : <span className="state red">nobody ({unheld} such)</span>}</td>
+                {/* An operator opening a late case is not reading it for the record; they
+                    are deciding whether to take it off the routing queue by hand, and they
+                    cannot judge that from an accession number. */}
+                <td><button onClick={() => onOpen(c.studyId)}>Open</button></td>
               </tr>
             ))}
           </tbody>
@@ -228,6 +238,7 @@ function Waiting({ show }: { show: boolean }) {
                   {b.poolWidened && ' · pool widened'}
                 </div>
               </div>
+              <button onClick={() => onOpen(b.studyId)}>Open</button>
             </div>
           ))}
         </>
@@ -278,6 +289,7 @@ export default function App() {
   const [modality, setModality] = useState('');
   const [routableOnly, setRoutableOnly] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [openStudy, setOpenStudy] = useState<number | null>(null);
 
   const isReader = session !== null && READER_ROLES.includes(session.user.role);
   const isOperator = session !== null && OPERATOR_ROLES.includes(session.user.role);
@@ -347,6 +359,10 @@ export default function App() {
 
   if (booting) return <main className="card">Loading…</main>;
   if (!session) return <Login onSignedIn={setSession} />;
+  // The viewer takes the whole window. A reader comparing two slices should not be doing
+  // it in a panel the size of a sidebar, and the board behind it is not the thing on
+  // screen while a case is open. The heartbeat keeps running underneath.
+  if (openStudy !== null) return <Viewer studyId={openStudy} onBack={() => setOpenStudy(null)} />;
 
   const counts = data?.counts ?? { green: 0, amber: 0, red: 0 };
 
@@ -390,9 +406,9 @@ export default function App() {
           </div>
         )}
 
-        {isReader && <Worklist onChanged={() => { void refresh(); }} />}
+        {isReader && <Worklist onChanged={() => { void refresh(); }} onOpen={setOpenStudy} />}
 
-        {isOperator && <Waiting show={isOperator} />}
+        {isOperator && <Waiting show={isOperator} onOpen={setOpenStudy} />}
 
         {counts.green === 0 && !feedError && (
           <div className="banner">Nobody is routable right now. Anything waiting will wait.</div>

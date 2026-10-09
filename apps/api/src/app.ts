@@ -17,7 +17,9 @@ import { orphansRouter } from './routes/orphans.js';
 import { presenceRouter } from './routes/presence.js';
 import { sitesRouter } from './routes/sites.js';
 import { uploadsRouter } from './routes/uploads.js';
+import { viewRouter } from './routes/view.js';
 import { worklistRouter } from './routes/worklist.js';
+import type { OrthancClient } from './orthanc.js';
 
 const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
 const MAX_FAILED = 5;
@@ -28,13 +30,13 @@ export type AppDeps = {
   version: string;
   inboxRoot: string;
   secureCookies: boolean;
-  pingOrthanc: () => Promise<boolean>;
+  orthanc: OrthancClient;
 };
 
 export { COOKIE, readCookie };
 
 export function createApp(deps: AppDeps): Express {
-  const { db, version, inboxRoot, secureCookies, pingOrthanc } = deps;
+  const { db, version, inboxRoot, secureCookies, orthanc } = deps;
   const app = express();
   app.disable('x-powered-by');
 
@@ -59,7 +61,7 @@ export function createApp(deps: AppDeps): Express {
       await db.execute(sql`select 1`);
       checks.db = true;
     } catch { checks.db = false; }
-    checks.orthanc = await pingOrthanc().catch(() => false);
+    checks.orthanc = await orthanc.ping().catch(() => false);
     const ok = checks.db && checks.orthanc;
     res.status(ok ? 200 : 503).json({ ok, version, components: checks });
   });
@@ -236,6 +238,7 @@ export function createApp(deps: AppDeps): Express {
   app.use('/v1', orphansRouter(db));
   app.use('/v1', presenceRouter(db));
   app.use('/v1', worklistRouter(db));
+  app.use('/v1', viewRouter(db, orthanc));
 
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     // Never echo an exception message: it can carry a connection string or a

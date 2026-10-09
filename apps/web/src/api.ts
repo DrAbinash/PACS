@@ -105,6 +105,58 @@ export type BlockedCase = {
   nearestReader: { userId: number; name: string; missing: string[] } | null;
 };
 
+export type ViewDescriptor = {
+  ok: boolean;
+  generatedAt: string;
+  study: {
+    id: number;
+    accession: string | null;
+    modality: string | null;
+    subSpecialty: string | null;
+    priority: string;
+    studyDescription: string | null;
+    studyDate: string | null;
+    receivedAt: string;
+    linkState: string;
+    nodeState: string;
+    patient: { name: string | null; mrn: string | null; gender: string | null; dob: string | null };
+  };
+  held: { assignmentId: number; state: string } | null;
+  series: {
+    index: number;
+    pk: string;
+    uid: string | null;
+    description: string | null;
+    modality: string | null;
+    bodyPart: string | null;
+    count: number;
+    instances: string[];
+  }[];
+  windowing: 'client';
+  pixelFormat: 'int16-le';
+};
+
+export type ViewInstance = {
+  ok: boolean;
+  instanceId: string;
+  rows: number | null;
+  columns: number | null;
+  bitsStored: number | null;
+  bitsAllocated: number | null;
+  pixelRepresentation: number;
+  photometric: string | null;
+  windowCenter: string | null;
+  windowWidth: string | null;
+  rescaleSlope: number | null;
+  rescaleIntercept: number | null;
+  instanceNumber: number | null;
+  sliceLocation: number | null;
+  pixelSpacing: string | null;
+  seriesDescription: string | null;
+  contentDate: string | null;
+  patientOrientation: string | null;
+};
+
 export const api = {
   session: () => call<Session>('/v1/auth/session'),
   login: (email: string, password: string) =>
@@ -128,4 +180,25 @@ export const api = {
       '/v1/escalations'),
   blocked: () =>
     call<{ unassigned: BlockedCase[]; counts: { unassigned: number; blocked: number } }>('/v1/dispatch/unassigned'),
+  view: (studyId: number) => call<ViewDescriptor>(`/v1/view/${studyId}`),
+  viewInstance: (studyId: number, pk: string) =>
+    call<ViewInstance>(`/v1/view/${studyId}/instances/${encodeURIComponent(pk)}`),
+  // Pixels, not JSON: a 16-bit frame is two bytes a pixel and a study is hundreds of
+  // frames, so the base of the image arrives as the bytes the node measured.
+  viewFrame: (studyId: number, pk: string, index: number) => frame(studyId, pk, index),
 };
+
+async function frame(studyId: number, pk: string, index: number): Promise<ArrayBuffer> {
+  const res = await fetch(`/v1/view/${studyId}/instances/${encodeURIComponent(pk)}/frames/${index}`, {
+    credentials: 'same-origin',
+  });
+  if (!res.ok) {
+    // The failure is JSON even though success is not, because "no pixels in this frame"
+    // has to reach the reader as a reason and not as a black square.
+    const text = await res.text();
+    let body: Record<string, unknown> = {};
+    try { body = text ? JSON.parse(text) as Record<string, unknown> : {}; } catch { /* an html error page */ }
+    throw new ApiError(res.status, String(body.error ?? res.statusText), String(body.error ?? ''));
+  }
+  return await res.arrayBuffer();
+}

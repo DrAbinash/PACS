@@ -288,6 +288,34 @@ the real cause and `received_at` is a fact about the scanner:
   (`warning: "… does not list sub-specialty mr-spine or modality MR"`) with the same list in
   the audit row.
 
+What has to be true of the viewer. `scripts/validation/run-view-flow.py` drives it over HTTP
+and checks the pixels themselves; the points worth re-checking by hand on a real node:
+
+- opening is **not** the same permission as reading the worklist. `GET /v1/view/:studyId`
+  answers `not_your_case` to a signed-in reader who does not hold the case, and a study
+  belonging to another centre answers **404 rather than 403**, so an id cannot be probed
+  for existence;
+- a second check happens per instance: an instance that exists on the node but is not in
+  that study's tree is refused. Both halves have to pass, because the first one is about a
+  person and the second is about a path;
+- **the node cannot window, and this is not a belief.** Ask the same frame twice with
+  different `/preview?window-center=` values: they come back byte-identical. That is why the
+  api ships `int16` numbers and the browser does the level and width, and why the descriptor
+  says `windowing: "client"`. If a future node starts honouring those parameters, this whole
+  path should be re-measured before it is trusted;
+- the numbers must be the numbers. A window change alters the picture and must never alter
+  the values; `run-view-flow.py` re-derives each frame from the fixture's arithmetic, so a
+  silent truncation to 8 bits or a row-order mistake fails loudly;
+- a frame response carries `Cache-Control: no-store`. Pixels of a patient's study must not
+  sit in a shared browser cache;
+- if a study is `not_at_node` or the node rejects the credential, the viewer says so in a
+  sentence. A reader staring at a black rectangle cannot tell "this node does not have it"
+  from "this node is down", and those are different calls for different people.
+
+Do **not** point OHIF at this deployment yet. `infra/orthanc/orthanc.json` contains a
+`DicomWeb` block with `Enable: true`, but `curl -s -u …/dicom-web/` answers 404 on the pinned
+image — the config is inert because the plugin is not loaded. Load it, re-measure, then revisit.
+
 ## 9. Prove the negative cases before trusting the pipeline
 
 ```bash
@@ -313,14 +341,18 @@ this deployment holds test data only.
 Built and proven on test data: the on-panel board and its heartbeat, the dispatcher that
 offers a case only to a green reader who covers it, the reader's own worklist with accept
 and decline, the escalation stages that widen the pool and stamp a breach, the operator's
-late board, and manual assign with its reason and its reported coverage mismatch.
+late board, manual assign with its reason and its reported coverage mismatch, and a viewer
+that shows a reader the case they hold — grayscale, window and level, series strip, slice
+scroll — with the pixels verified against what the node actually stores.
 
-Not built: the **viewer** — a reader can accept a study today and has no way to open it,
-which is the next thing standing between this and a working night shift. Also missing:
-report authoring and the two-signature flow, delivery back to the center, billing and
-payouts, and any pager or SMS — `alert_ops` and `notify_center` are recorded, not sent.
+Not built: a **diagnostic** viewer. What exists has no hanging protocols, no MPR, no
+measurement or annotation tools, no cine, and shows one series at a time; it is enough to
+look at a study and not enough to sign one. Also missing: report authoring and the
+two-signature flow, delivery back to the center, billing and payouts, and any pager or SMS —
+`alert_ops` and `notify_center` are recorded, not sent.
 The upload *endpoints* exist and are proven; the *agent* a center installs on its modality
 PC to call them does not, so today that channel only works for a browser upload or a
 script. README at the root lists the phase plan; docs/ARCHITECTURE.md states what exists,
-including the two open routing gaps it names: **a declined case is never asked again** and
-**a widened offer has no ceiling**.
+including the open items it names: **a declined case is never asked again**, **a widened
+offer has no ceiling**, the viewer ships text-shaped pixels and their byte cost, and frames
+are not individually audited.

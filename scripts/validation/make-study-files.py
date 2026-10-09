@@ -29,10 +29,26 @@ MODALITY = os.environ.get("MODALITY", "CT")
 BODY_PART = os.environ.get("BODY_PART", "HEAD")
 STUDY_DESC = os.environ.get("STUDY_DESC", "CT HEAD")
 SERIES_DESC = os.environ.get("SERIES_DESC", "HEAD NATIVE")
+ROWS = int(os.environ.get("ROWS", "64"))
+COLUMNS = int(os.environ.get("COLUMNS", "64"))
 # Secondary capture is the storage class a digital radiography plate writes; a CT
 # SOP class with Modality=DX would be a file Orthanc accepts and no real PACS sends.
 SOP_CLASS = CTImageStorage if MODALITY in ("CT", "MR", "NM") else SecondaryCaptureImageStorage
 STUDY_DATE = os.environ.get("STUDY_DATE", datetime.date.today().strftime("%Y%m%d"))
+
+
+def pixels(number: int) -> bytes:
+    """A 16-bit gradient with a bright disc, so a wrong window is visible and a wrong
+    byte order is measurable. A flat four-pixel image renders identically at every
+    window setting, which is exactly why it could not be used to test the viewer."""
+    out = bytearray()
+    for y in range(ROWS):
+        for x in range(COLUMNS):
+            v = 400 + ((x * y + number * 37) % 900)
+            if (x - ROWS // 2) ** 2 + (y - COLUMNS // 2) ** 2 < 60:
+                v += 700
+            out += int(min(v, 4095)).to_bytes(2, "little")
+    return bytes(out)
 
 
 def build(number: int) -> Dataset:
@@ -62,17 +78,27 @@ def build(number: int) -> Dataset:
     ds.StudyDescription = STUDY_DESC
     ds.SeriesDescription = SERIES_DESC
     ds.BodyPartExamined = BODY_PART
-    ds.Rows = 4
-    ds.Columns = 4
+    ds.Rows = ROWS
+    ds.Columns = COLUMNS
     ds.SamplesPerPixel = 1
     ds.BitsAllocated = 16
     ds.BitsStored = 12
     ds.HighBit = 11
     ds.PixelRepresentation = 0
     ds.PhotometricInterpretation = "MONOCHROME2"
-    ds.PixelData = bytes([number] * 32)
+    ds.PixelData = pixels(number)
     ds.InstanceNumber = number
     ds.IsLandscape = False
+    # A cross-sectional study carries the HU transform and its own window; a radiograph
+    # carries neither. Both shapes have to be drawn by the viewer, so both are generated —
+    # the fallback path, window from the stored range, is the one that goes wrong quietly.
+    if MODALITY in ("CT", "MR", "NM"):
+        ds.RescaleIntercept = "-1024"
+        ds.RescaleSlope = "1"
+        ds.WindowCenter = "40"
+        ds.WindowWidth = "400"
+        ds.SliceLocation = str(number * 5)
+        ds.PixelSpacing = "0.5\\0.5"
     return ds
 
 

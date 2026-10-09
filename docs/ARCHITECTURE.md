@@ -127,6 +127,40 @@ the only place a path appears.
   rows had never done that, so the trap sat in the code for as long as only one process
   wrote the chain.
 
+- **The window is computed in the browser because the node refuses to compute it.** This
+  was measured twice on the pinned container before it was believed: `/instances/{id}/preview`
+  with `size`, `min`, `max`, `modality` and `quality`, and `/frames/{i}/image-uint8` with
+  eight different windows, returned **one identical PNG** in each case (`distinct outputs: 1`).
+  So the api ships stored pixel values and the console applies rescale and window here —
+  which is also what makes brightness and contrast adjustable at all on a NAS with no GPU.
+- **`/frames/{index}/matlab` is the only endpoint on this build that answers with numbers.**
+  `image-int16` and `image-uint16` answer with a 16-bit PNG (a browser cannot window a
+  canvas that has already been downconverted to 8 bits), and `matlab` answers with text in
+  the shape `double([ r0c0 r0c1 … ; r1c0 … ])` — **rows separated by semicolons**, which
+  is invisible in a truncated print and broke the first parser exactly that way. The unit
+  fixture now carries the semicolons and the live check compares 4,096 values against the
+  arithmetic the fixture wrote, because "it parsed" is not "it parsed correctly".
+- **Core REST does not resolve a DICOM UID in the path.** `GET /studies/1.2.3.960` answers
+  404 while `/studies/<internal-pk>` answers 200, so the viewer runs on the `node_pk` the
+  ingest poller stored at first sight. Also 404 on this build, and not to be re-guessed:
+  `/instances/{id}/download`, `/thumbnail`, `/headers`, `/shared-tags`,
+  `/studies/{pk}/preview`. Tags come from `/instances/{id}/tags`, structure from
+  `/studies/{pk}/series` (which arrives with each series' `Instances` already expanded).
+- **A pixel request is authorised twice, and the second time is not about the user.** The
+  caller must hold the study — offered, accepted or reading, since looking is how a reader
+  decides whether to accept, and an accept that had to be blind is the one thing the
+  padlock rule forbids. Then the *instance* must be one of that study's instances: Orthanc's
+  ids are unguessable, and unguessable is not an authorisation check. A malformed id is
+  refused before the node is asked at all (`NODE_ID` regex), so a path traversal attempt
+  never reaches a URL builder.
+- **One study structure read per minute, not one per scroll.** `/studies/{pk}/series` is
+  cached in the router for 60 s (`TREES_MAX` caps the map). Without it a 300-slice CT asks
+  the node for the same answer 300 times. A study worth opening is already complete —
+  nothing dispatchable is still arriving — so the staleness is not clinical.
+- **Frames cross as `int16-le` with `no-store`.** The headers carry the format and the
+  pixel count so the browser does not have to guess what it is holding, and a cached frame
+  would outlive the assignment that made it readable.
+
 ## Known open items, stated rather than implied
 
 - **One failed query takes the whole api down.** Express 4 does not catch a rejected
@@ -141,6 +175,32 @@ the only place a path appears.
   ~30 call sites, deliberately not done in a hurry. Until it is, `/health/ready` plus a
   restart count is the only evidence, and **any new raw `sql` fragment that takes a
   timestamp must bind `date.toISOString()` with an explicit `::timestamptz` cast.**
+- **The image node in this deployment cannot serve a real viewer, and the config says it
+  can.** `infra/orthanc/orthanc.json` contains a `DicomWeb` block with `Enable: true`, but
+  `/plugins` on the pinned container answers `["explorer.js", "gdcm", "orthanc-explorer-2"]`
+  — the DICOMweb plugin is one of **33 `.so` files sitting in `/usr/share/orthanc/plugins-available/`**
+  and only two are in `plugins/`. The config is therefore inert, `/dicom-web/` is not a
+  route, and OHIF cannot be pointed at this node until the plugin is actually loaded and
+  the result re-measured. That is a deployment step nobody has taken, and the section in
+  the config file predates knowing it.
+- **The viewer ships text-shaped pixels, and that has a price.** `matlab` measures 17,645
+  bytes for a 64×64 frame against 2,027 bytes for the same frame as a 16-bit PNG — 4.3
+  bytes per stored value. Scaled to a 512×512 CT slice that is roughly 1.1 MB of text per
+  slice, per reader, per scroll. It is correct and it is slow. The fix is measured and
+  available: fetch `image-int16` and inflate the PNG in the browser with `fflate` (already
+  a worker dependency, pure JS, no native compile) — which needs the IDAT filter types
+  undone for 16-bit grayscale, and must then agree with the `matlab` numbers to be trusted.
+- **Nobody audited the individual frames.** `view.open` is written when a case is opened
+  and that is the record of who looked. A reader scrolling 300 slices writes one audit row,
+  deliberately — 300 rows per case would make the chain unreadable — but it means the
+  answer to "who saw this specific image, when" is "they opened the study at 02:13", which
+  is a weaker claim than the rest of this audit trail makes.
+- **This is not a diagnostic viewer.** No pan, no zoom beyond the browser's, no magnifier,
+  no measurement or annotation tools, no MPR, no hanging protocol, no prefetch of the next
+  slice. It draws the pixels with an adjustable window and it scrolls. The gap between that
+  and what a radiologist signs a report against is the DICOMweb item above, not more canvas
+  code.
+
 - **A declined case is never asked again, and widening cannot fix that.** Rotation
   refuses to re-offer a study to a reader who has already been asked, so the chest film
   a reader sends back with a reason stays in `/v1/dispatch/unassigned` with
@@ -252,7 +312,10 @@ schedule, which is why retention is data and not a constant.
 | `apps/api` accept / decline / my-work / unassigned | **Proven live over HTTP and in the browser**: accept returned a one-time lock token, wrote `assignments.accepted_at` *and* `sla_clocks.accepted_at`; a second accept got 409 `not_offered`; another reader's assignment answered 404, not 403; decline without a reason got 422 and with one released the case. `GET /v1/dispatch/unassigned` named the real gap on the declined chest study: `Dr Chest — already_offered`. Dr Second accepted through the console's own Accept button and the row moved to `accepted` |
 | Reader provisioning (`cli add-reader`) | Built and used by the verification. Requires coverage lists, and refuses a stray argument: an unquoted `--name Dr Second` used to create an account called "Dr", which then won the alphabetical tie-break for the STAT case. Real routing bug, found through a real CLI trap |
 | Console worklist for the reader | Built and **seen in the browser**: "Your cases" renders the live offer with Accept and Decline, a per-second countdown to the lapse, and the patient/modality/accession line; Accept was clicked and the database row confirmed `accepted` with a lock token. Layout has not been reviewed as an image — this browser gives no viewport |
-| Viewer, reports, delivery, billing | **Not built.** The dispatcher routes, the reader accepts, and there is no image viewer to read the case in yet — which means a reader can accept a study they currently have no way to open |
+| Viewer, reports, delivery, billing | Reports, delivery and billing are **not built**. The viewer exists and draws real pixels with an adjustable window, but it is not diagnostic-grade — see the open items |
+| Orthanc capability probe (`.tmp` scripts, now `scripts/validation/probe-*.py`) | Run against the pinned digest before the viewer was designed: plugins loaded, tag endpoints, every rendering endpoint with and without a window, the numeric frame path and its exact text shape. The result is the six viewer rules above, and it overturned three endpoint names this repository's own worker had assumed |
+| `apps/api` viewer routes (`/v1/view/:studyId`) | **Proven live over HTTP** (`scripts/validation/run-view-flow.py`, 17 assertions): the holder opens a case and gets its series with instance ids; the frame arrives as 8,192 bytes of `int16-le` with `X-Telrad-Pixel-Count: 4096` and `Cache-Control: no-store`, and **all 4,096 values equal the arithmetic the fixture wrote** (`0 of 4096 differ`); two slices of one study are two different images. Another reader gets 403 `not_your_case`, an instance belonging to somebody else's study gets 404 `not_in_this_study`, no session gets 401, a malformed node id gets 400 before the node is asked, and `frameIndex` out of range gets 400. An operator may open a case they do not hold, and every open writes `view.open` |
+| Console viewer | Built and **seen in the browser** as the reader who holds the case: `ACC-VIEW-1` opens full-window with the header, the series strip (`HEAD NATIVE 3`), `slice 1 / 3` and `64×64 · 12-bit · windowed here`. The canvas holds an image, not a rectangle — **217 distinct grey levels, min 0 / max 255, mean 61.2**; ArrowDown moved to slice 2 (222 distinct, mean 58.7); narrowing the window to 60 collapsed it to 45 distinct levels, which is the window doing work on this side of the wire. The chest reader's DX film, which carries **no WindowCenter at all**, drew through the stored-range fallback at 80 distinct levels / mean 52.3 rather than going black. Console shows only the expected 401s from `/v1/auth/session` after a logout |
 | Escalation rule (`packages/shared/src/escalation.ts`) | Built, 16 assertions: `elapsedPct` (unclamped above 100, zero-window measured as 100), `rulesFor` (a tenant's rows **replace** the platform's for that priority, they do not merge), `dueStages` (nothing fires on a signed clock, every missed stage returns in one pass), `widenStage` |
 | `apps/worker` escalation pass | **Proven live on the real clocks.** Crossing 55 % produced `escalate checked=3 staged=2 breached=0 actions=widen_pool:2` and one `sla.escalated` row per clock with `actor_kind = system`; 80 % produced `alert_ops:1`; pushing a case from 65 % straight to 98 % fired **stages 2 and 3 in one pass** with two audit rows, and the deadline pass reported `breached=2`. An immediate second pass reported nothing, and the breach count in `audit_log` is still one row per clock |
 | The widened offer, measured | The chest study whose only cover had just filled their one-slot queue was offered anyway (`dispatch widened=1`) and they accepted, taking the queue to **2 of 1**; the manual assign below made it 3 of 1, which is the open item rather than a surprise. The spine MRI whose only full cover was *paused* stayed unheld at the same stage: `poolWidened=true, status=blocked, nearest=Dr Paused (not_routable)`. Dr Green, green and idle for the whole run with the wrong lists, was never offered anything at any stage |

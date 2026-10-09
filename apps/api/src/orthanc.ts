@@ -1,19 +1,42 @@
 import type { Env } from './env.js';
 
+/**
+ * A refusal from the node, carried as a status rather than as prose, because the viewer
+ * has to answer 404 for a study the node does not have and 502 for a node that is not
+ * answering — and a reader staring at a black rectangle cannot tell those apart.
+ */
+export class OrthancError extends Error {
+  constructor(readonly status: number, path: string) {
+    super(`orthanc ${status} on ${path}`);
+    this.name = 'OrthancError';
+  }
+}
+
 export type OrthancClient = {
   ping: () => Promise<boolean>;
   get: <T>(path: string) => Promise<T>;
+  /** Node-scoped reads, for a study whose storage node is not the deployment default. */
+  nodeJson: <T>(baseUrl: string, path: string) => Promise<T>;
+  nodeText: (baseUrl: string, path: string) => Promise<string>;
 };
 
 export function createOrthancClient(env: Env['orthanc']): OrthancClient {
   const auth = 'Basic ' + Buffer.from(`${env.user}:${env.password}`).toString('base64');
 
-  async function get<T>(path: string): Promise<T> {
-    const res = await fetch(`${env.baseUrl}${path}`, {
+  // Node-scoped, because a study lives on one node and a deployment has more than one.
+  // The credential stays global: the schema has no per-node secret, and inventing one
+  // here would be a second source of truth for something storage_nodes does not model.
+  async function fetchOne(baseUrl: string, path: string, timeoutMs: number): Promise<Response> {
+    const res = await fetch(`${baseUrl}${path}`, {
       headers: { Authorization: auth },
-      signal: AbortSignal.timeout(8_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
-    if (!res.ok) throw new Error(`orthanc ${res.status} on ${path}`);
+    if (!res.ok) throw new OrthancError(res.status, path);
+    return res;
+  }
+
+  async function get<T>(path: string): Promise<T> {
+    const res = await fetchOne(env.baseUrl, path, 8_000);
     return await res.json() as T;
   }
 
@@ -37,5 +60,13 @@ export function createOrthancClient(env: Env['orthanc']): OrthancClient {
       }
     },
     get,
+    // Study structure is a handful of kilobytes; the node is local, so eight seconds is
+    // already generous, and a slower answer is a fault worth seeing.
+    nodeJson: async <T,>(baseUrl: string, path: string) =>
+      (await (await fetchOne(baseUrl, path, 8_000)).json()) as T,
+    // A frame is the node decoding pixels and printing 4096 numbers per megapixel, which
+    // is CPU work on the same box that holds the archive. Twenty seconds, and no retry:
+    // a reader who scrolls again while this is in flight is the retry.
+    nodeText: async (baseUrl: string, path: string) => (await fetchOne(baseUrl, path, 20_000)).text(),
   };
 }
