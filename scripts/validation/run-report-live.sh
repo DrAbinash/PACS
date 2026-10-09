@@ -68,6 +68,9 @@ python "$ROOT/scripts/validation/run-report-flow.py" --phase accept | tail -3
 say "phase check"
 python "$ROOT/scripts/validation/run-report-flow.py" --phase check
 
+say "phase critical"
+python "$ROOT/scripts/validation/run-report-flow.py" --phase critical
+
 say "phase late-clock-after-sign"
 python "$ROOT/scripts/validation/run-report-flow.py" --phase late-clock-after-sign
 

@@ -527,12 +527,230 @@ def phase_late_clock_after_sign():
     print(f"worker: {(ran.stdout or '').strip()[-300:]}")
 
 
+def phase_critical():
+    """The closed loop: a finding is not communicated until a named person says they heard it.
+
+    Every competitor screen in the study set stops at "the reader wrote it down". This phase
+    drives the half they do not have: a reader declares a critical finding and names who they
+    told, the document stops being releasable while that call is unanswered, the desk records
+    the answer, and a call nobody answers is stamped late by the worker rather than by the
+    clock on somebody's laptop.
+
+    The sub-specialty's `requires_reviewer` flag is flipped partway through. That is not a
+    trick: the two gates are independent rules, and the only way to show that the critical
+    loop is the one standing is to remove the other one from in front of it.
+    """
+    green, second, ops = flow.login(GREEN), flow.login(SECOND), flow.owner()
+    study_id = int(psql(f"select id from telrad.studies where accession_number = '{ACC}';"))
+    current = ops.call("GET", f"/v1/reports/current?studyId={study_id}")[1].get("report", {})
+    report_id = current.get("id")
+    flow.check("the live version is the amended one, signed and waiting on a second name",
+               current.get("version") == 2 and current.get("state") == "signed",
+               json.dumps([current.get("version"), current.get("state")]))
+
+    status, body = ops.call("GET", "/v1/criticals/catalogue")
+    codes = [c["code"] for c in body.get("conditions", [])]
+    flow.check("the catalogue is served, not copied into the browser",
+               status == 200 and "intracranial-haemorrhage" in codes and "other" in codes,
+               json.dumps(codes)[:160])
+    flow.check("and every entry carries the window it promises",
+               all(isinstance(c.get("slaMinutes"), int) and c["slaMinutes"] > 0
+                   for c in body.get("conditions", [])),
+               json.dumps(body.get("conditions", [])[:2])[:160])
+
+    status, body = ops.call("GET", "/v1/criticals")
+    flow.check("no loop is open before anybody declares one",
+               status == 200 and body.get("counts", {}).get("open") == 0,
+               f"{status} {json.dumps(body)[:120]}")
+
+    # ---- who may declare -------------------------------------------------------------
+    status, body = green.call("POST", "/v1/criticals", {
+        "studyId": study_id, "condition": "pneumothorax", "channel": "phone",
+        "receiverName": "Dr Rao", "receiverPhone": "+919876543210",
+    })
+    flow.check("a reader who neither holds the case nor wrote the report cannot declare on it",
+               status == 403 and body.get("error") == "not_your_case", f"{status} {body}")
+
+    declare = {
+        "studyId": study_id, "condition": "intracranial-haemorrhage", "channel": "phone",
+        "receiverName": "Dr A. Rao", "receiverRole": "Emergency medical officer",
+        "receiverPhone": "+919876543210",
+    }
+    status, body = second.call("POST", "/v1/criticals", {**declare, "condition": "pnuemothorax"})
+    flow.check("a code that is not in the list is refused rather than filed as something",
+               status == 422 and body.get("error") == "unknown_condition", f"{status} {body}")
+
+    status, body = second.call("POST", "/v1/criticals", {**declare, "receiverPhone": ""})
+    flow.check("a phone call with no number is not a claim anybody could check later",
+               status == 422 and body.get("error") == "phone_required_for_channel", f"{status} {body}")
+
+    status, body = second.call("POST", "/v1/criticals", {**declare, "receiverName": "  "})
+    flow.check("and a finding told to nobody is not communicated at all",
+               status == 422 and body.get("error") == "receiver_name_required", f"{status} {body}")
+
+    status, body = second.call("POST", "/v1/criticals",
+                               {**declare, "condition": "other", "channel": "portal",
+                                "receiverPhone": None, "detail": ""})
+    flow.check("\"other\" has to carry the words, or the board says nothing",
+               status == 422 and body.get("error") == "detail_required", f"{status} {body}")
+
+    status, body = second.call("POST", "/v1/criticals", {**declare, "channel": "carrier-pigeon"})
+    flow.check("an unknown channel is refused instead of defaulting to one",
+               status == 422 and body.get("error") == "channel_required", f"{status} {body}")
+
+    status, body = second.call("POST", "/v1/criticals", declare)
+    declared = body.get("critical", {})
+    flow.check("the reader who wrote the report declares it, and the server stamps the clock",
+               status == 201 and declared.get("state") == "waiting"
+               and bool(declared.get("notifiedAt")) and declared.get("slaMinutes") == 10,
+               f"{status} {json.dumps(declared)[:180]}")
+    flow.check("the countdown is on the response, not computed by the browser",
+               declared.get("minutesLeft") is not None and declared.get("minutesLeft") <= 10,
+               str(declared.get("minutesLeft")))
+    flow.check("and the declaration says what it does to the document",
+               declared.get("reportId") == report_id and body.get("blocksDelivery") is True,
+               json.dumps([declared.get("reportId"), report_id, body.get("blocksDelivery")]))
+    critical_id = declared.get("id")
+
+    status, body = ops.call("GET", f"/v1/reports/{report_id}")
+    withloop = body.get("report", {})
+    flow.check("the report carries the open loop and its text",
+               len(withloop.get("criticals", [])) == 1
+               and withloop["criticals"][0]["text"].startswith("Acute intracranial"),
+               json.dumps(withloop.get("criticals"))[:200])
+    flow.check("and the delivery panel now counts it",
+               withloop.get("delivery", {}).get("openCriticals") == 1
+               and withloop.get("can", {}).get("deliver") is False,
+               json.dumps([withloop.get("delivery"), withloop.get("can", {}).get("deliver")])[:200])
+
+    # ---- the two gates, in order -----------------------------------------------------
+    status, body = ops.call("POST", f"/v1/reports/{report_id}/deliver", {})
+    flow.check("the second-name rule is checked first, so the desk is told the nearer gap",
+               status == 422 and body.get("error") == "review_required", f"{status} {body}")
+
+    psql("update telrad.sub_specialties set requires_reviewer = false where code = 'ct-head';")
+    status, body = ops.call("POST", f"/v1/reports/{report_id}/deliver", {})
+    flow.check("with the reviewer rule removed, the unanswered finding is what stops it",
+               status == 422 and body.get("error") == "critical_unacknowledged", f"{status} {body}")
+
+    status, body = ops.call("GET", "/v1/reports/awaiting-delivery")
+    row = [d for d in body.get("awaiting", []) if d.get("reportId") == report_id]
+    flow.check("and the board names the reason on the row instead of hiding the button",
+               len(row) == 1 and row[0].get("deliverable") is False
+               and row[0].get("reason") == "critical_unacknowledged"
+               and row[0].get("openCriticals") == 1,
+               f"{status} {json.dumps(row)[:200]}")
+
+    # ---- who may close it ------------------------------------------------------------
+    status, body = green.call("POST", f"/v1/criticals/{critical_id}/ack",
+                              {"acknowledgedByName": "Dr A. Rao"})
+    flow.check("a reader cannot answer for the clinic they themselves phoned",
+               status == 403, f"{status} {body}")
+
+    status, body = ops.call("POST", f"/v1/criticals/{critical_id}/ack", {"acknowledgedByName": " "})
+    flow.check("an acknowledgement from nobody is not one",
+               status == 422 and body.get("error") == "receiver_name_required", f"{status} {body}")
+
+    status, body = ops.call("POST", f"/v1/criticals/999999/ack", {"acknowledgedByName": "Dr Rao"})
+    flow.check("a loop that does not exist answers 404", status == 404, f"{status} {body}")
+
+    status, body = ops.call("POST", f"/v1/criticals/{critical_id}/ack",
+                            {"acknowledgedByName": "Dr A. Rao", "acknowledgedByRole": "EMO"})
+    acked = body.get("critical", {})
+    flow.check("the desk records who said they heard it",
+               status == 200 and acked.get("state") == "acknowledged"
+               and acked.get("acknowledgedByName") == "Dr A. Rao"
+               and body.get("openForStudy") == 0,
+               f"{status} {json.dumps(body)[:180]}")
+    flow.check("and an answer inside its own window is not late",
+               acked.get("late") is False, str(acked.get("late")))
+
+    status, body = ops.call("POST", f"/v1/criticals/{critical_id}/ack",
+                            {"acknowledgedByName": "Dr A. Rao"})
+    flow.check("the first answer is the one that counts, so a second cannot rewrite it",
+               status == 422 and body.get("error") == "already_acknowledged", f"{status} {body}")
+
+    status, body = ops.call("POST", f"/v1/reports/{report_id}/deliver", {})
+    delivered = body.get("report", {})
+    flow.check("and the document goes once somebody has answered",
+               status == 200 and delivered.get("state") == "delivered",
+               f"{status} {json.dumps(body)[:140]}")
+    sha_after = (delivered.get("delivery") or {}).get("pdfSha256")
+    status, pdf, headers = fetch_bytes(ops, f"/v1/reports/{report_id}/pdf")
+    flow.check("the delivered PDF is the bytes that were recorded, findings block and all",
+               status == 200 and pdf[:5] == b"%PDF-"
+               and hashlib.sha256(pdf).hexdigest() == sha_after,
+               f"{status} {hashlib.sha256(pdf).hexdigest()[:16]} vs {(sha_after or '')[:16]}")
+
+    written = psql("select count(*) from telrad.audit_log where action = 'report.delivered' "
+                   f"and entity_id = '{report_id}' "
+                   "and detail->'criticals' -> 0 ->> 'acknowledgedByName' = 'Dr A. Rao';")
+    flow.check("the audit row for the delivery names who acknowledged, not just that they did",
+               written.strip() == "1", written)
+
+    # ---- the worker, not the wall clock ----------------------------------------------
+    status, body = second.call("POST", "/v1/criticals", {
+        "studyId": study_id, "condition": "suspected-malignancy", "channel": "portal",
+        "receiverName": "Dr M. Iyer", "receiverRole": "Oncology registrar",
+    })
+    late_id = body.get("critical", {}).get("id")
+    flow.check("a second finding can be declared after the report has gone",
+               status == 201 and bool(late_id), f"{status} {json.dumps(body)[:140]}")
+
+    # A portal deposit is allowed to have no phone number, and it is the one channel that does
+    # not claim anybody was reached. Move its clock back past its own day-long window the way a
+    # night shift actually arrives: hours later, with nobody having rung.
+    pushed = subprocess.run(["docker", "exec", "tr-ci", "psql", "-U", "telrad", "-d", "telrad", "-c",
+                             "update telrad.critical_events set notified_at = notified_at "
+                             f"- interval '1500 minutes' where id = {late_id};"],
+                            capture_output=True, text=True)
+    flow.check("the second finding was notified 25 hours ago", pushed.returncode == 0,
+               (pushed.stderr or pushed.stdout)[:160])
+
+    ran = subprocess.run("pnpm --filter @telrad/worker criticals-once", shell=True,
+                         capture_output=True, text=True)
+    # The output is asserted, not just the exit code. `pnpm --filter <pkg> <missing-script>`
+    # prints an apology and exits 0, which is how a verification step goes missing from a run
+    # that everyone then calls proven.
+    flow.check("the sweep ran and reported what it settled",
+               ran.returncode == 0 and "critical checked=" in (ran.stdout or ""),
+               (ran.stderr or ran.stdout)[-200:])
+
+    stamped = psql(f"select breached from telrad.critical_events where id = {late_id};")
+    flow.check("it is marked breached in the table", stamped.strip() == "t", stamped)
+    audit = psql("select count(*) from telrad.audit_log where action = 'critical.breached' "
+                 f"and entity_id = '{late_id}';")
+    flow.check("and once, in the audit chain, with the reason", audit.strip() == "1", audit)
+
+    status, body = ops.call("GET", f"/v1/criticals?studyId={study_id}")
+    listed = body.get("criticals", [])
+    flow.check("the board shows the overdue one and no longer the answered one",
+               status == 200 and [c["id"] for c in listed] == [late_id]
+               and listed[0]["state"] == "breached" and listed[0]["minutesLeft"] < 0,
+               f"{status} {json.dumps(body)[:200]}")
+    flow.check("a desk account is offered the answer on the board row",
+               listed and listed[0].get("mayAcknowledge") is True, json.dumps(listed)[:160])
+
+    status, body = green.call("GET", f"/v1/criticals?studyId={study_id}")
+    flow.check("a reader sees the same loop and is not",
+               status == 200 and all(not c.get("mayAcknowledge") for c in body.get("criticals", [])),
+               f"{status} {json.dumps(body)[:160]}")
+
+    actions = [e.get("action") for e in ops.call("GET", "/v1/audit/latest")[1].get("entries", [])]
+    for needed in ["critical.declared", "critical.acknowledged", "critical.board", "critical.breached"]:
+        flow.check(f"the audit chain carries {needed}", needed in actions, json.dumps(actions[:14]))
+
+    psql("update telrad.sub_specialties set requires_reviewer = true where code = 'ct-head';")
+    print(f"worker: {(ran.stdout or '').strip()[-200:]}")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--phase", required=True,
-                        choices=["prepare", "accept", "check", "late-clock-after-sign"])
+                        choices=["prepare", "accept", "check", "critical", "late-clock-after-sign"])
     args = parser.parse_args()
     {"prepare": phase_prepare, "accept": phase_accept, "check": phase_check,
+     "critical": phase_critical,
      "late-clock-after-sign": phase_late_clock_after_sign}[args.phase]()
     if flow.FAILED:
         print(f"\n{len(flow.FAILED)} assertion(s) failed: {', '.join(flow.FAILED)}")

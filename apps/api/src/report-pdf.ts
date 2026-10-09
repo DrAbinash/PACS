@@ -57,7 +57,17 @@ export type ReportPdfInput = {
   reviewer: { name: string; registration: string } | null;
   signedAt: string | null;
   verifiedAt: string | null;
-  criticals: { code: string; label: string }[];
+  // Who was told, and whether they said they heard it. Both halves belong on the document: the
+  // clinic reading it back needs to know which of its own staff the finding landed on, and the
+  // line "not yet acknowledged" is the one that turns a missing call into something visible on
+  // paper rather than only on a board.
+  criticals: {
+    code: string;
+    label: string;
+    told: string | null;
+    acknowledgedAt: string | null;
+    deadlineAt: string | null;
+  }[];
 };
 
 // Wrapping is measured with the font that will draw it, not assumed from a character
@@ -242,6 +252,12 @@ export async function renderReportPdf(source: ReportPdfInput): Promise<{
     heading('Critical findings communicated', 11, ALERT);
     for (const c of input.criticals) {
       body(`${c.label} (${c.code})`, BODY_SIZE, ALERT);
+      // Who was told, and whether they said they heard it. A document that printed only the
+      // finding would look like a notification while carrying none of the evidence — and this
+      // line is the half a referring clinic cannot reconstruct from anything else.
+      body(`${c.told ?? 'Receiver not recorded'} · ${c.acknowledgedAt
+        ? `acknowledged ${c.acknowledgedAt}`
+        : `acknowledgement NOT YET RECEIVED (was due ${stamp(c.deadlineAt)})`}`, 9, MUTED);
     }
     y -= 6;
   }

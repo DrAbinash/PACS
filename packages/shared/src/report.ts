@@ -126,15 +126,24 @@ export function amendDecision(input: {
  * belongs here rather than at signing time, because a reader on a night shift must be
  * able to sign and go; what may not happen is the clinic receiving it before the second
  * name exists.
+ *
+ * `openCriticals` is the count of critical findings on this version that no named receiver
+ * has acknowledged yet, and it blocks the release. This is the whole point of the loop: a
+ * report carrying an unacknowledged pneumothorax that quietly lands in a portal is the
+ * failure mode that gets a patient harmed and a service sued, and the document is the slow
+ * channel. The desk that wants to release it has to get somebody on the other end to say
+ * they heard it first — which is a phone call, not a click.
  */
 export function deliverDecision(input: {
   state: ReportState;
   requiresReviewer: boolean;
   hasReviewer: boolean;
+  openCriticals: number;
 }): Decision {
   if (input.state === 'delivered') return refused('already_delivered');
   if (!stateAllows('deliver', input.state)) return refused('not_signed');
   if (input.requiresReviewer && !input.hasReviewer) return refused('review_required');
+  if (input.openCriticals > 0) return refused('critical_unacknowledged');
   return { ok: true };
 }
 

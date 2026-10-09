@@ -1,11 +1,12 @@
-import { and, eq, gte, inArray, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, asc, eq, gte, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import type { Db } from '@telrad/db';
 import {
-  appendAudit, assignments, dispatchableStudies, escalationRules, ingestCursors, ingestEvents, offerHistory, orders,
+  appendAudit, assignments, criticalEvents, dispatchableStudies, escalationRules, ingestCursors, ingestEvents, offerHistory, orders,
   panelReaders, patients, slaClocks, studies, subSpecialties, tenantSites, uploadBatches, uploadFiles,
 } from '@telrad/db';
 import { LIMITS, type EscalationRule, type Priority } from '@telrad/shared';
 import type { EscalatableClock, EscalationPort } from './escalate.js';
+import type { CriticalPort } from './criticals.js';
 import type { DispatchPort } from './dispatch.js';
 import type { OrderCandidate, StorePort } from './ingest.js';
 import type { InboxStore } from './inbox.js';
@@ -391,6 +392,54 @@ export function createEscalationStore(db: Db): EscalationPort {
         .set({ breached: true, breachedAt: now })
         .where(and(eq(slaClocks.id, clockId), eq(slaClocks.breached, false)))
         .returning({ id: slaClocks.id });
+      return rows.length > 0;
+    },
+
+    async record(input) { await appendAudit(db, input); },
+  };
+}
+
+export function createCriticalStore(db: Db): CriticalPort {
+  return {
+    async eventsToSettle(limit) {
+      // The filter is the whole design. A loop acknowledged inside its own deadline is left out
+      // rather than fetched and skipped, so the set this sweep walks stays the size of the
+      // problem (unanswered calls, and calls answered late) instead of growing with every
+      // critical finding the service has ever handled.
+      const rows = await db.select({
+        id: criticalEvents.id,
+        studyId: criticalEvents.studyId,
+        tenantId: criticalEvents.tenantId,
+        conditionCode: criticalEvents.conditionCode,
+        notifiedAt: criticalEvents.notifiedAt,
+        detectedAt: criticalEvents.detectedAt,
+        slaMinutes: criticalEvents.slaMinutes,
+        acknowledgedAt: criticalEvents.acknowledgedAt,
+        accession: studies.accessionNumber,
+        receiverName: criticalEvents.receiverName,
+      }).from(criticalEvents)
+        .innerJoin(studies, eq(studies.id, criticalEvents.studyId))
+        .where(and(
+          eq(criticalEvents.breached, false),
+          or(
+            isNull(criticalEvents.acknowledgedAt),
+            sql`${criticalEvents.acknowledgedAt} > coalesce(${criticalEvents.notifiedAt}, ${criticalEvents.detectedAt})
+                   + (${criticalEvents.slaMinutes} * interval '1 minute')`,
+          ),
+        ))
+        .orderBy(asc(criticalEvents.notifiedAt))
+        .limit(limit);
+
+      return rows.map((row) => ({ ...row, accession: row.accession ?? null }));
+    },
+
+    async markBreached(id) {
+      // Conditional on the flag still being false: two workers on the same tick, or a worker
+      // and a verification script, must produce one breach row and not one audit line each.
+      const rows = await db.update(criticalEvents)
+        .set({ breached: true })
+        .where(and(eq(criticalEvents.id, id), eq(criticalEvents.breached, false)))
+        .returning({ id: criticalEvents.id });
       return rows.length > 0;
     },
 

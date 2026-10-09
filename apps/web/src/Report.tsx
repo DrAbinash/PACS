@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   REPORT_SECTIONS, REQUIRED_SECTIONS, missingSections, type ReportSection,
 } from '@telrad/shared/report';
+import { CriticalPanel } from './Critical';
 import { api, ApiError, type ReportView } from './api';
 
 const LABEL: Record<ReportSection, string> = {
@@ -15,6 +16,7 @@ const LABEL: Record<ReportSection, string> = {
 const DELIVERY_TEXT: Record<string, string> = {
   not_signed: 'No signature on this version yet, so there is nothing to release.',
   review_required: 'This sub-specialty needs a second name before the clinic can be sent the report.',
+  critical_unacknowledged: 'A critical finding on this case has not been answered by a named clinician yet.',
   already_delivered: 'Already released to the clinic.',
 };
 
@@ -233,6 +235,13 @@ export default function ReportPanel({ studyId, onChanged }: { studyId: number; o
             <span className="sub">delivered PDF sha256 {view.delivery.pdfSha256.slice(0, 12)}…</span>
           )}
         </div>
+      )}
+
+      {live && (
+        <CriticalPanel
+          report={view}
+          onChanged={() => void run(() => api.report(view.id).then((r) => r.report))}
+        />
       )}
 
       <div className="signatures">

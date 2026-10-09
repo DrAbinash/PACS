@@ -34,23 +34,8 @@ export function mayAmend(authorGrade: Grade, amenderGrade: Grade): boolean {
   return GRADE_RANK[amenderGrade] > GRADE_RANK[authorGrade];
 }
 
-export const CRITICAL_CONDITIONS = [
-  'pulmonary_embolism',
-  'aortic_dissection',
-  'cardiac_tamponade',
-  'tension_pneumothorax',
-  'airway_foreign_body',
-  'ischaemic_stroke',
-  'intracerebral_haemorrhage',
-  'subarachnoid_haemorrhage',
-  'cerebral_herniation',
-  'hollow_viscus_perforation',
-  'organ_rupture',
-  'strangulated_bowel_obstruction',
-] as const;
-export type CriticalCondition = (typeof CRITICAL_CONDITIONS)[number];
-
-export const CRITICAL_NOTIFY_SLA_MINUTES = 10;
+// The critical-finding catalogue lives in `criticals.ts`, where each code carries the label a
+// desk reads and the acknowledgement window it promised.
 
 export const NIGHT_WINDOW = { startHour: 23, endHour: 7 } as const;
 

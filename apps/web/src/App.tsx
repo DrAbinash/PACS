@@ -15,6 +15,7 @@ import {
 } from './api';
 
 import Viewer from './Viewer';
+import { CriticalBoard } from './Critical';
 import { explainCode } from './Report';
 
 const HEARTBEAT_MS = 20_000;
@@ -32,6 +33,7 @@ const SHORT_REASON: Record<string, string> = {
   review_required: 'awaiting a second name',
   not_signed: 'not signed yet',
   already_delivered: 'already sent',
+  critical_unacknowledged: 'a finding is unanswered',
 };
 
 type Mine = { color: PresenceColor; code: string; label: string; routable: boolean; openCases: number; maxQueueSize: number };
@@ -635,6 +637,8 @@ export default function App() {
         {isReader && <ReviewQueue show onOpen={setOpenStudy} />}
 
         {isReader && <MyReports show onOpen={setOpenStudy} />}
+
+        {isDesk && <CriticalBoard show={isDesk} canOpen={isOperator} onOpen={setOpenStudy} />}
 
         {isDesk && <AwaitingDelivery show={isDesk} canOpen={isOperator} onOpen={setOpenStudy} />}
 

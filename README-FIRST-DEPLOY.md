@@ -313,8 +313,10 @@ and checks the pixels themselves; the points worth re-checking by hand on a real
   from "this node is down", and those are different calls for different people.
 
 What has to be true of a report. `scripts/validation/run-report-flow.py` drives the whole
-lifecycle over HTTP — draft, sign, countersign, amend, and a signed clock pushed past its
-deadline — and the points worth re-checking by hand with two reader accounts:
+lifecycle over HTTP — draft, sign, countersign, deliver, amend, a critical finding declared and
+answered, and a signed clock pushed past its deadline — in five phases (`--phase prepare`,
+`accept`, `check`, `critical`, `late-clock-after-sign`), and the points worth re-checking by hand
+with two reader accounts:
 
 - **a signature needs words.** Leave Impression empty and Sign is refused, naming the field.
   The button is greyed for the same reason: the browser applies
@@ -348,12 +350,39 @@ deadline — and the points worth re-checking by hand with two reader accounts:
   on the late board, `isBreached` has gone back to comparing the deadline with the wall clock;
 - **an amendment does not restart the clock.** Deliberate: the center was answered on time by
   the first signature, and a correction must not become a breach the dispatcher widens a pool
-  for.
+  for;
+- **delivery is a desk act, and it is where the two remaining rules bite.** A radiologist —
+  including the one who signed — gets 403 on `POST /v1/reports/:id/deliver`, and the desk role
+  gets 200. A report whose sub-specialty needs a second name refuses with `review_required`
+  until a reviewer exists, which is the first time `sub_specialties.requires_reviewer` stops
+  being a caption on a screen. A report carrying a critical finding nobody has answered refuses
+  with `critical_unacknowledged`, and the board's row says so instead of hiding the button.
+  Check the ordering: with both gaps present the answer is `review_required`, because that is
+  the nearer thing the desk can fix;
+- **the delivered document is reproducible, and its hash is the claim.** Download the PDF twice
+  and diff the bytes; `reports.pdf_sha256` must equal the hash of what the route just sent.
+  Nothing operational is printed on the page — the first version printed `Delivered <timestamp>`
+  and rewrote the document whose hash had just been recorded, which the live run caught as
+  `aef3e83e… vs 667f0e5c…`. The one deliberate exception is the superseded banner, and the
+  download audit then carries `matchesRecord: false` rather than pretending;
+- **a critical finding is not a notification until a named person answers.** Declare one as the
+  report's author (`POST /v1/criticals`, a code from `GET /v1/criticals/catalogue`, the channel,
+  and the name of who was told) and the report becomes undeliverable. A reader cannot record the
+  acknowledgement — that is a desk act, and it is the guard that stops a reader closing their own
+  loop. `notified_at` is written by the server and never accepted from the caller, so a service
+  cannot backdate a call into last night's compliance. Then run
+  `pnpm --filter @telrad/worker criticals-once` after moving a `notified_at` into the past: the
+  row gets `breached = true` and one `critical.breached` audit row. A finding acknowledged *late*
+  is stamped too — if only open loops were swept, the breach would depend on when a process
+  happened to wake up.
 
-What is not built here yet: **delivery**. A report stops at `verified`; there is no PDF, no
-`delivered` state, nothing in `report_deliveries`, and `critical_events` — the closed loop for
-a critical finding with a named receiver who acknowledges it — has no writer. The center you
-are billing cannot see a single report in this product.
+What is not built here yet: **the message.** A report does leave the system now — the desk
+releases it, the PDF is rendered and its SHA-256 recorded, and a critical finding cannot be
+answered-for by a click a reader makes — but nothing is *sent*. There is no email, no PDF to a
+clinic that has no login, and no telephone call placed by the product: `critical_events` records
+the call a reader says they made and the answer a desk says it received, and the referring
+clinic's own notification of "your report is ready" still does not exist. Not built either:
+billing, payouts, and any pager or SMS.
 
 Do **not** point OHIF at this deployment yet. `infra/orthanc/orthanc.json` contains a
 `DicomWeb` block with `Enable: true`, but `curl -s -u …/dicom-web/` answers 404 on the pinned
@@ -401,16 +430,20 @@ offers a case only to a green reader who covers it, the reader's own worklist wi
 and decline, the escalation stages that widen the pool and stamp a breach, the operator's
 late board, manual assign with its reason and its reported coverage mismatch, a viewer
 that shows a reader the case they hold — grayscale, window and level, series strip, slice
-scroll — with the pixels verified against what the node actually stores, and the report
-desk: draft, sign, a second name from a different reader, and an amendment that supersedes
-the signed version instead of editing it.
+scroll — with the pixels verified against what the node actually stores, the report desk —
+draft, sign, a second name from a different reader, an amendment that supersedes the signed
+version instead of editing it, and release to the clinic as a PDF whose SHA-256 is recorded and
+re-verified on every later download — and the critical-finding loop: a reader declaring a
+condition from a closed list and naming who they telephoned, the report held undelivered until
+somebody at the referring end is recorded as having answered, and the worker stamping a breach
+on a call nobody answered while a call answered late keeps its breach too.
 
-Not built: **delivery**. A report stops at `verified` — no PDF, no `delivered` state, nothing
-in `report_deliveries`, and `critical_events` (a critical finding with a named receiver who
-acknowledges it) has no writer. The referring clinic cannot see a single report in this
-product, which is also why the "notify the center" question stays open: there is no event to
-notify about yet. Not built either: billing and payouts, and any pager or SMS — `alert_ops`
-and `notify_center` are recorded, not sent. Not a **diagnostic** viewer either: what exists
+Not built: **the message**. Nothing is sent to anybody. The delivery row is written and no email,
+WhatsApp or HL7 goes out with it, so a referring clinic without a login still hears nothing —
+which is also why "notify the center" stays open. The critical loop records a telephone call, it
+does not place one, and an acknowledgement is a name typed by a desk rather than an identity
+proved. Not built either: billing and payouts, and any pager or SMS — `alert_ops` and
+`notify_center` are recorded, not sent. Not a **diagnostic** viewer either: what exists
 has no hanging protocols, no MPR, no measurement or annotation tools, no cine, and shows one
 series at a time; it is enough to look at a study and not enough to sign one in a reading
 room that expects those tools.
@@ -418,6 +451,7 @@ The upload *endpoints* exist and are proven; the *agent* a center installs on it
 PC to call them does not, so today that channel only works for a browser upload or a
 script. README at the root lists the phase plan; docs/ARCHITECTURE.md states what exists,
 including the open items it names: **a declined case is never asked again**, **a widened
-offer has no ceiling**, **nothing watches a report that is waiting for its second name**,
-`requires_reviewer` is displayed and enforced nowhere, the viewer ships text-shaped pixels
-and their byte cost, and frames are not individually audited.
+offer has no ceiling**, **nothing escalates a report that is waiting for its second name**
+(it is listed, blocked and visible, but untimed), the delivered document is regenerated rather
+than stored, the viewer ships text-shaped pixels and their byte cost, and frames are not
+individually audited.

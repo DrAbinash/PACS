@@ -459,12 +459,19 @@ export const reports = telrad.table('reports', {
 // The closed loop: a critical finding is not a notification until a named
 // receiver has acknowledged it, and both signatures are stored. This is the one
 // feature in the study set that neither the US nor the Indian products encode.
+// `notified_at` is written by the server at declaration and never taken from the
+// caller, `acknowledged_at` by the desk, and an unacknowledged row holds the
+// report undelivered (`deliverDecision` in `@telrad/shared`) until it is answered.
 export const criticalEvents = telrad.table('critical_events', {
   id: serialId('id'),
   studyId: integer('study_id').notNull().references(() => studies.id),
   reportId: integer('report_id').references(() => reports.id),
   tenantId: tenantId,
   conditionCode: text('condition_code').notNull(),
+  // The reader's own words. Required when `condition_code` is `other`, and kept beside the
+  // catalogue label the whole time otherwise: the closed list decides the SLA, and this is
+  // what the finding actually was.
+  detail: text('detail'),
   detectedByUserId: integer('detected_by_user_id').references(() => users.id),
   detectedAt: at('detected_at'),
   notifiedAt: timestamp('notified_at', { withTimezone: true, mode: 'date' }),
@@ -474,9 +481,15 @@ export const criticalEvents = telrad.table('critical_events', {
   receiverPhone: text('receiver_phone'),
   acknowledgedAt: timestamp('acknowledged_at', { withTimezone: true, mode: 'date' }),
   acknowledgedByName: text('acknowledged_by_name'),
+  acknowledgedByUserId: integer('acknowledged_by_user_id').references(() => users.id),
   slaMinutes: smallint('sla_minutes').notNull().default(10),
   breached: boolean('breached').notNull().default(false),
-});
+}, (t) => ({
+  // Both board questions are open-loop questions, and both are asked oldest-first by the
+  // desk and by the worker sweep on the same tick.
+  openIdx: index('critical_events_open_idx').on(t.acknowledgedAt, t.notifiedAt),
+  reportIdx: index('critical_events_report_idx').on(t.reportId),
+}));
 
 export const reportDeliveries = telrad.table('report_deliveries', {
   id: serialId('id'),

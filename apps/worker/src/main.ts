@@ -1,10 +1,11 @@
 import { openDb } from '@telrad/db';
+import { criticalSweepOnce } from './criticals.js';
 import { dispatchSweep } from './dispatch.js';
 import { escalateOnce } from './escalate.js';
 import { pollOnce, recheckStalled } from './ingest.js';
 import { drainOnce } from './inbox.js';
 import { createOrthancReader, createOrthancWriter } from './orthanc.js';
-import { createDispatchStore, createEscalationStore, createInboxStore, createStore } from './store.js';
+import { createCriticalStore, createDispatchStore, createEscalationStore, createInboxStore, createStore } from './store.js';
 
 function env(name: string): string {
   const v = process.env[name];
@@ -30,6 +31,7 @@ const orthancWriter = createOrthancWriter({
 const inbox = createInboxStore(handle.db);
 const dispatch = createDispatchStore(handle.db);
 const escalation = createEscalationStore(handle.db);
+const criticals = createCriticalStore(handle.db);
 const inboxRoot = env('TR_INBOX_ROOT');
 const removeAfterPush = process.env.TR_INBOX_REMOVE_AFTER_PUSH !== 'false';
 
@@ -41,6 +43,18 @@ async function escalate(): Promise<void> {
   if (e.staged > 0 || e.breached > 0) {
     console.log(`escalate checked=${e.checked} staged=${e.staged} breached=${e.breached} `
       + `actions=${Object.entries(e.byAction).map(([a, n]) => `${a}:${n}`).join(',') || 'none'}`);
+  }
+}
+
+// A critical loop is settled on its own clock and its own label. The report SLA sweeping a
+// deadline is a service measuring its own turnaround; this one is a named clinician still not
+// having heard a result, and a tick that fails here is a different outage from a tick that
+// fails in routing.
+async function settleCriticalLoops(): Promise<void> {
+  const c = await criticalSweepOnce(criticals);
+  if (c.breached > 0) {
+    console.log(`critical checked=${c.checked} breached=${c.breached} waiting=${c.waiting} `
+      + '(a finding nobody at the referring end has acknowledged past its deadline)');
   }
 }
 
@@ -90,6 +104,15 @@ async function tick(): Promise<void> {
   }
 
   try {
+    await settleCriticalLoops();
+  } catch (err) {
+    // Its own label, for its own reason: a loop that never gets its breach stamped is a
+    // quality failure the operator cannot see, and a log line that says `dispatch failed`
+    // would send them looking at routing.
+    console.error('critical sweep failed', err instanceof Error ? err.message : err);
+  }
+
+  try {
     // Escalate before dispatch so a case that has just crossed its widen threshold can be
     // offered to a fuller reader on this tick rather than the next one; dispatch runs
     // last so a study that just became complete and linked is offered in the same tick it
@@ -106,11 +129,19 @@ async function tick(): Promise<void> {
 console.log(`telrad worker starting node=${nodeId} poll=${pollSeconds}s mode=${process.argv[2] ?? 'loop'}`);
 
 if (process.argv[2] === 'dispatch-once') {
-  // The routing half of a tick with no ingest beside it: escalation then dispatch.
+  // The routing half of a tick with no ingest beside it: the critical clocks, then
+  // escalation, then dispatch.
   // Exists for a first deploy, where the queue is seeded by hand and an operator wants
   // to see the routing decision before any pixels arrive, and for verification.
+  await settleCriticalLoops();
   await escalate();
   await sweep();
+  await handle.close();
+} else if (process.argv[2] === 'criticals-once') {
+  // Only the acknowledgement clocks. A verification run uses this to stamp a breach without
+  // touching routing, because a sweep that also dispatches moves cases onto readers' desks
+  // and the run then proves nothing about the loop it came to look at.
+  await settleCriticalLoops();
   await handle.close();
 } else if (process.argv[2] === 'once') {
   await tick();

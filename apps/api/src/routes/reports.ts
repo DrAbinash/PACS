@@ -10,6 +10,9 @@ import {
 } from '@telrad/shared';
 import { Router, type Response } from 'express';
 import { requireAuth, requireRole, scoped, scopeTenant, type Ctx, type Principal } from '../auth.js';
+import {
+  criticalsForStudy, describeCritical, openCriticalCounts, type DescribedCritical,
+} from '../criticals-reads.js';
 import { ah } from '../handler.js';
 import { renderReportPdf, reportPdfFilename, type ReportPdfInput } from '../report-pdf.js';
 
@@ -198,12 +201,18 @@ export function reportsRouter(db: Db): Router {
     history: Awaited<ReturnType<typeof versionsOf>>,
     me: { userId: number; role: string; grade: Grade | null } | null,
     authorGrade: Grade | null,
+    criticals: DescribedCritical[],
   ) {
     const mine = me !== null && row.authorUserId === me.userId;
+    // Counted from the loops still open on this study, which is what the delivery rule asks
+    // for: an acknowledged finding stops gating, and one nobody has answered does not stop
+    // gating because the report describing it was corrected.
+    const openCriticals = criticals.filter((c) => c.acknowledgedAt === null).length;
     const deliverable = deliverDecision({
       state: row.state,
       requiresReviewer: row.requiresReviewer,
       hasReviewer: row.reviewerUserId !== null,
+      openCriticals,
     });
     return {
       id: row.id,
@@ -259,6 +268,10 @@ export function reportsRouter(db: Db): Router {
         // whether the row may be released: a blocked desk row says why it is blocked, and a
         // reader who has no part in releasing it sees nothing.
         showDelivery: me !== null && DESK_ROLES.includes(me.role),
+        // A reader may *try* to declare; who may actually do it for this study — the one
+        // holding the case or the one who wrote the report on it — is the route's question,
+        // and it answers `not_your_case` in the reader's own words.
+        declareCritical: me !== null && READER_ROLES.includes(me.role),
         // Any role that may read the report may take the document: the clinic's own doctor
         // asking "what did you send us" is answered by the same bytes.
         download: DOWNLOADABLE.includes(row.state),
@@ -268,7 +281,12 @@ export function reportsRouter(db: Db): Router {
         recipient: row.referringName ?? 'referring clinician not recorded',
         decision: deliverable.ok ? null : deliverable.reason,
         pdfSha256: row.pdfSha256,
+        openCriticals,
       },
+      // The loops themselves, not only their count: a desk refused `critical_unacknowledged`
+      // has to be able to see who the reader phoned and when the acknowledgement fell due, or
+      // the next act is a telephone call to find out what the screen already knew.
+      criticals,
       history,
       study: {
         accession: row.accession,
@@ -311,7 +329,7 @@ export function reportsRouter(db: Db): Router {
     extra: {
       supersedesVersion: number | null;
       supersededByVersion: number | null;
-      criticals?: { code: string; label: string }[];
+      criticals?: DescribedCritical[];
     },
   ): ReportPdfInput {
     return {
@@ -347,7 +365,17 @@ export function reportsRouter(db: Db): Router {
         : { name: row.reviewerName ?? 'unnamed', registration: row.reviewerRegistration ?? '—' },
       signedAt: utc(row.signedAt),
       verifiedAt: utc(row.verifiedAt),
-      criticals: extra.criticals ?? [],
+      // Mapped here rather than in the renderer, so the document keeps printing whatever the
+      // loop actually said instead of knowing anything about the row it came from.
+      criticals: (extra.criticals ?? []).map((c) => ({
+        code: c.conditionCode,
+        label: c.text,
+        told: c.receiverName === null ? null
+          : `Told ${c.receiverName}${c.receiverRole ? ` (${c.receiverRole})` : ''}`
+            + ` by ${c.channel ?? 'an unrecorded channel'}`,
+        acknowledgedAt: utc(c.acknowledgedAt),
+        deadlineAt: utc(c.deadlineAt),
+      })),
     };
   }
 
@@ -355,6 +383,12 @@ export function reportsRouter(db: Db): Router {
     const row = await loadReport(reportId);
     if (!row) return res.status(404).json({ ok: false, error: 'not_found' });
     const [me, author] = await Promise.all([profileOf(p.userId), profileOf(row.authorUserId)]);
+    // Described for *this* caller: the same open loop is an action for the desk and a status
+    // line for the reader who phoned, and a screen that offered the reader the Ack button would
+    // let them close a loop nobody at the clinic has actually confirmed.
+    const now = new Date();
+    const criticals = (await criticalsForStudy(db, row.studyId))
+      .map((c) => describeCritical(c, now, DESK_ROLES.includes(p.role)));
     return res.status(status).json({
       ok: true,
       // The grade comes from the clinician profile and may legitimately be missing (a desk
@@ -362,7 +396,7 @@ export function reportsRouter(db: Db): Router {
       // the same lookup, and conflating them would grey out a button for the wrong reason.
       report: describeReport(row, await versionsOf(row.studyId),
         { userId: p.userId, role: p.role, grade: me?.grade ?? null },
-        author?.grade ?? null),
+        author?.grade ?? null, criticals),
     });
   }
 
@@ -512,19 +546,26 @@ export function reportsRouter(db: Db): Router {
       ))
       .orderBy(reports.signedAt);
 
+    // One grouped query for the page rather than one per row: the desk board is a list, and a
+    // reader scrolling it should not cost a round trip per study.
+    const openByStudy = await openCriticalCounts(db, rows.map((row) => row.studyId));
+
     // Per row, because the answer depends on the row's own sub-specialty: a signed MRI that
     // is waiting on a second name and a signed chest film that never needed one are both
     // "not delivered", and only one of them is a gap someone has to chase.
     const out = rows.map((row) => {
+      const openCriticals = openByStudy.get(row.studyId) ?? 0;
       const decision = deliverDecision({
         state: row.state,
         requiresReviewer: row.requiresReviewer ?? false,
         hasReviewer: row.reviewerUserId !== null,
+        openCriticals,
       });
       return {
         ...row,
         deliverable: decision.ok,
         reason: decision.ok ? null : decision.reason,
+        openCriticals,
         needsSecondName: needsSecondName({
           state: row.state,
           requiresReviewer: row.requiresReviewer ?? false,
@@ -536,12 +577,23 @@ export function reportsRouter(db: Db): Router {
     await appendAudit(db, {
       actorUserId: p.userId, actorKind: 'human', tenantId: p.tenantId,
       action: 'report.delivery_queue', entity: 'reports',
-      detail: { count: out.length, blocked: out.filter((o) => !o.deliverable).length },
+      detail: {
+        count: out.length,
+        blocked: out.filter((o) => !o.deliverable).length,
+        // Split by cause, because they are different people's work: a row blocked for a second
+        // name needs a reviewer, and a row blocked for an open critical loop needs a phone call.
+        blockedByCritical: out.filter((o) => o.reason === 'critical_unacknowledged').length,
+        blockedByReview: out.filter((o) => o.reason === 'review_required').length,
+      },
     });
     res.json({
       ok: true,
       generatedAt: new Date(),
-      counts: { total: out.length, ready: out.filter((o) => o.deliverable).length },
+      counts: {
+        total: out.length,
+        ready: out.filter((o) => o.deliverable).length,
+        blockedByCritical: out.filter((o) => o.reason === 'critical_unacknowledged').length,
+      },
       awaiting: out,
     });
   }));
@@ -573,10 +625,17 @@ export function reportsRouter(db: Db): Router {
     const scope = scopeTenant(p);
     if (scope !== null && row.tenantId !== scope) return await denied(res, p, String(id), true);
 
+    const history = await versionsOf(row.studyId);
+    const now = new Date();
+    const criticals = (await criticalsForStudy(db, row.studyId))
+      .map((c) => describeCritical(c, now, true));
+    const openCriticals = criticals.filter((c) => c.acknowledgedAt === null).length;
+
     const decision = deliverDecision({
       state: row.state,
       requiresReviewer: row.requiresReviewer,
       hasReviewer: row.reviewerUserId !== null,
+      openCriticals,
     });
     if (!decision.ok) return res.status(422).json({ ok: false, error: decision.reason });
 
@@ -584,13 +643,12 @@ export function reportsRouter(db: Db): Router {
     // failed to produce a document would leave a report marked as sent with nothing behind
     // it — which is the worst of the orderings, because the clinic is told and the bytes
     // do not exist.
-    const history = await versionsOf(row.studyId);
     const rendered = await renderReportPdf(pdfInputOf(row, {
       supersedesVersion: versionOf(history, row.supersedesReportId),
       supersededByVersion: supersededByOf(history, row.id),
+      criticals,
     }));
 
-    const now = new Date();
     const [delivered] = await db.update(reports)
       .set({ state: 'delivered', deliveredAt: now, pdfSha256: rendered.sha256 })
       .where(and(eq(reports.id, id), inArray(reports.state, DELIVER_STATES)))
@@ -625,6 +683,17 @@ export function reportsRouter(db: Db): Router {
         pdfBytes: rendered.bytes.length,
         pdfPages: rendered.pages,
         requiredSecondName: row.requiresReviewer,
+        // Every loop that was open or closed at the moment the document left, with the name
+        // that closed it. This is the row an investigator reads to establish that a critical
+        // finding was acknowledged *before* the report went out rather than after.
+        criticals: criticals.map((c) => ({
+          code: c.conditionCode,
+          receiver: c.receiverName,
+          channel: c.channel,
+          acknowledgedAt: c.acknowledgedAt,
+          acknowledgedByName: c.acknowledgedByName,
+          late: c.late,
+        })),
       },
     });
     return respond(res, p, id);
@@ -642,9 +711,15 @@ export function reportsRouter(db: Db): Router {
     if (!DOWNLOADABLE.includes(row.state)) return res.status(409).json({ ok: false, error: 'not_signed' });
 
     const history = await versionsOf(row.studyId);
+    // The same block the delivered copy carried: a re-download of a report that went out with
+    // an open loop has to show that loop still open, or the document stops being evidence.
+    const now = new Date();
+    const criticals = (await criticalsForStudy(db, row.studyId))
+      .map((c) => describeCritical(c, now, true));
     const rendered = await renderReportPdf(pdfInputOf(row, {
       supersedesVersion: versionOf(history, row.supersedesReportId),
       supersededByVersion: supersededByOf(history, row.id),
+      criticals,
     }));
 
     await appendAudit(db, {

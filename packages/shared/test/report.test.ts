@@ -223,29 +223,47 @@ describe('mayReadReport', () => {
 });
 
 describe('deliverDecision', () => {
+  // Every case starts with no open critical loop, because that is the ordinary report and a
+  // test that had to spell it out each time would bury the four rules that differ.
+  const clean = { requiresReviewer: false, hasReviewer: false, openCriticals: 0 };
+
   it('refuses a draft, because there is nothing signed to hand over', () => {
-    expect(deliverDecision({ state: 'draft', requiresReviewer: false, hasReviewer: false }))
+    expect(deliverDecision({ state: 'draft', ...clean }))
       .toEqual({ ok: false, reason: 'not_signed' });
   });
 
   it('refuses a report that has already gone out', () => {
     // `not_signed` would be the lazy answer and it would be a lie: the report is signed,
     // it is delivered, and an operator reading "not signed" would go looking for a reader.
-    expect(deliverDecision({ state: 'delivered', requiresReviewer: true, hasReviewer: true }))
+    expect(deliverDecision({ state: 'delivered', requiresReviewer: true, hasReviewer: true, openCriticals: 0 }))
       .toEqual({ ok: false, reason: 'already_delivered' });
   });
 
   it('enforces the second name at the door the patient data leaves through', () => {
     // A signed report on a sub-specialty that requires review cannot reach the clinic until
     // a reviewer is named. The reader who signed it is not blocked — they sign and go home.
-    expect(deliverDecision({ state: 'signed', requiresReviewer: true, hasReviewer: false }))
+    expect(deliverDecision({ state: 'signed', requiresReviewer: true, hasReviewer: false, openCriticals: 0 }))
       .toEqual({ ok: false, reason: 'review_required' });
-    expect(deliverDecision({ state: 'signed', requiresReviewer: true, hasReviewer: true })).toEqual({ ok: true });
-    expect(deliverDecision({ state: 'verified', requiresReviewer: true, hasReviewer: true })).toEqual({ ok: true });
+    expect(deliverDecision({ state: 'signed', requiresReviewer: true, hasReviewer: true, openCriticals: 0 })).toEqual({ ok: true });
+    expect(deliverDecision({ state: 'verified', requiresReviewer: true, hasReviewer: true, openCriticals: 0 })).toEqual({ ok: true });
+  });
+
+  it('refuses to release a document carrying a finding nobody has acknowledged', () => {
+    // The order matters: a cleared second name does not make an unacknowledged pneumothorax
+    // safe to drop into a portal, so this check runs last and is the one still standing.
+    expect(deliverDecision({ state: 'verified', requiresReviewer: true, hasReviewer: true, openCriticals: 1 }))
+      .toEqual({ ok: false, reason: 'critical_unacknowledged' });
+    expect(deliverDecision({ state: 'signed', ...clean, openCriticals: 2 }))
+      .toEqual({ ok: false, reason: 'critical_unacknowledged' });
+  });
+
+  it('answers the more urgent gap first when a report carries both', () => {
+    expect(deliverDecision({ state: 'signed', requiresReviewer: true, hasReviewer: false, openCriticals: 1 }))
+      .toEqual({ ok: false, reason: 'review_required' });
   });
 
   it('lets a sub-specialty that does not require review deliver on one signature', () => {
-    expect(deliverDecision({ state: 'signed', requiresReviewer: false, hasReviewer: false })).toEqual({ ok: true });
+    expect(deliverDecision({ state: 'signed', ...clean })).toEqual({ ok: true });
   });
 });
 

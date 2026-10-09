@@ -189,12 +189,32 @@ describe('what the printed report says', () => {
     expect(lines).toContain('A hypodensity was missed.');
   });
 
-  it('names the critical finding that was communicated', async () => {
+  it('names the critical finding that was communicated, and who heard it', async () => {
     const { lines } = await renderReportPdf({
-      ...base, criticals: [{ code: 'pneumothorax', label: 'Left pneumothorax' }],
+      ...base, criticals: [{
+        code: 'pneumothorax', label: 'Pneumothorax',
+        told: 'Told Dr A. Rao (Medical Officer) by phone',
+        acknowledgedAt: '2026-10-10 03:14 UTC', deadlineAt: '2026-10-10 03:10 UTC',
+      }],
     });
     expect(lines).toContain('Critical findings communicated');
-    expect(lines).toContain('Left pneumothorax (pneumothorax)');
+    expect(lines).toContain('Pneumothorax (pneumothorax)');
+    expect(lines).toContain('Told Dr A. Rao (Medical Officer) by phone · acknowledged 2026-10-10 03:14 UTC');
+    // Nothing on the page may read as an open loop once the name is on the record.
+    expect(lines.some((l) => l.includes('NOT YET RECEIVED'))).toBe(false);
+  });
+
+  it('prints an unacknowledged finding as an open loop with the deadline it blew', async () => {
+    // The document is the artifact a service argues with afterwards, so the missing half of
+    // the loop has to be on paper and not only on the board.
+    const { lines } = await renderReportPdf({
+      ...base, criticals: [{
+        code: 'aortic-dissection', label: 'Suspected aortic dissection',
+        told: null, acknowledgedAt: null, deadlineAt: '2026-10-10 03:10 UTC',
+      }],
+    });
+    expect(lines).toContain('Suspected aortic dissection (aortic-dissection)');
+    expect(lines).toContain('Receiver not recorded · acknowledgement NOT YET RECEIVED (was due 2026-10-10 03:10 UTC)');
   });
 
   it('prints an unprintable name as question marks rather than dropping the patient row', async () => {

@@ -20,10 +20,16 @@ provably cannot window, and cannot serve DICOMweb as configured. A report is dra
 those images, cannot be signed while Findings or Impression is blank, cannot be countersigned
 by the name that signed it, and once signed cannot be edited at all: a correction is a new
 version that supersedes the old one, keeping both names and both timestamps. Signing stops the
-SLA clock and frees the reader's queue slot.
-There is still no money, nothing pages a person when a case cannot be routed — "alert" today
-means an audit row and the board — and **nothing is delivered**: a report stops at `verified`,
-no PDF exists, and `delivered` is a state no code path can reach. The viewer is a grayscale
+SLA clock and frees the reader's queue slot. A signed, cleared report is a document: the desk
+releases it, the PDF renders deterministically and its SHA-256 is recorded beside the delivery
+row, and the report reaches `delivered`. A critical finding is a second gate on that release —
+the reader declares it from a closed list and names who they telephoned, and the report cannot
+go to the clinic until somebody at the referring end is recorded as having answered it, with the
+worker stamping a breach when nobody does.
+There is still no money, nothing pages a person when a case cannot be routed and nothing phones
+the clinic when a finding is critical — "alert" today means an audit row and the board, and the
+acknowledgement loop records a call rather than making one. No message is sent to a referring
+clinic that has no login. The viewer is a grayscale
 image with window and level, **not** a diagnostic viewer: no hanging protocols, no MPR, no
 measurement or annotation tools, no cine, and no layout beyond one series at a time.
 Nothing in here has received a patient study. The inventory at the end of
@@ -44,14 +50,16 @@ viewer lives in this repo.
 | --- | --- | --- |
 | Ingest edge | center's modality or uploader | Orthanc C-STORE, watched folders, browser upload |
 | Worklist | radiologist | offers with a padlock, accept or decline-with-a-reason, lapse countdown; open the case you hold and window it — no auto-next yet |
-| Report desk | radiologist, reviewer | draft → sign → countersign → **deliver**: the signed report renders to a PDF whose SHA-256 is recorded, downloads as `telrad-<accession>-v<n>.pdf`, and moves the report to `delivered`. An amendment supersedes the version instead of editing it. Built and proven on test data. What is still missing is the message: a clinic with no login hears nothing |
-| Console | owner, center desk, center admin | who is routable, what is running out and who holds it, what cannot be routed and why, manual assign, what is signed and not yet released with the reason, and the same viewer for a case inside their own scope; tariffs, rosters, QC, invoices and payouts are still to come |
+| Report desk | radiologist, reviewer | draft → sign → countersign → **deliver**: the signed report renders to a PDF whose SHA-256 is recorded, downloads as `telrad-<accession>-v<n>.pdf`, and moves the report to `delivered`. An amendment supersedes the version instead of editing it. The reader declares a critical finding here from a closed list and names who they told; the report cannot be released while that answer is outstanding. What is still missing is the message: a clinic with no login hears nothing |
+| Console | owner, center desk, center admin | who is routable, what is running out and who holds it, what cannot be routed and why, manual assign, what is signed and not yet released with the reason, **which critical findings are still unanswered and by how much**, and the same viewer for a case inside their own scope; tariffs, rosters, QC, invoices and payouts are still to come |
 
 ## Layout
 
     apps/api        Express + Drizzle, the only writer of clinical state
-    apps/worker     ingest poller, inbox drain, study classifier, SLA clock, escalation
-    apps/web        one SPA: on-panel board, reader worklist, the viewer and the report desk
+    apps/worker     ingest poller, inbox drain, study classifier, SLA clock, escalation,
+                    critical-finding clocks
+    apps/web        one SPA: on-panel board, reader worklist, the viewer, the report desk and
+                    the critical-loop board
     packages/db     schema, migrations, connection
     packages/shared domain enums and pure logic, no I/O
     infra/          orthanc config, caddy config
@@ -63,7 +71,7 @@ viewer lives in this repo.
 [README-FIRST-DEPLOY.md](README-FIRST-DEPLOY.md) is the path, in the order an
 operator can verify each step. Do not improvise from this file.
 
-## Three rules that are not style preferences
+## Four rules that are not style preferences
 
 - A study's location is a `storage_node_id`, never a hostname in a row. The whole
   NAS-to-cloud move depends on this. See docs/ARCHITECTURE.md.
@@ -72,3 +80,7 @@ operator can verify each step. Do not improvise from this file.
   same tree.
 - A study that cannot be matched to a tenant and an order goes to the orphan
   bucket and stays unassignable. No signed report on a fuzzy match.
+- A critical finding is not communicated when the reader writes it down; it is
+  communicated when a named clinician at the referring end is recorded as having
+  answered. The report stays undelivered until then, and the clock on that
+  answer is separate from the clock on the report.

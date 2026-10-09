@@ -195,7 +195,7 @@ export type ReportView = {
   // the report to the clinic is a desk act, not a reading act.
   can: {
     edit: boolean; sign: boolean; countersign: boolean; amend: boolean; withdraw: boolean;
-    deliver: boolean; download: boolean; showDelivery: boolean;
+    deliver: boolean; download: boolean; showDelivery: boolean; declareCritical: boolean;
   };
   delivery: {
     channel: 'portal';
@@ -204,7 +204,11 @@ export type ReportView = {
     // of being hidden — a row that silently has no button is a row nobody chases.
     decision: string | null;
     pdfSha256: string | null;
+    openCriticals: number;
   };
+  // The critical loops on this study, in whatever state the server just computed them in.
+  // The report panel and the desk board read the same object.
+  criticals: CriticalItem[];
   history: {
     id: number; version: number; state: ReportState; authorName: string;
     supersedesReportId: number | null;
@@ -220,6 +224,42 @@ export type ReportView = {
     age: string | null; gender: string | null;
   };
 };
+
+// The critical-finding loop as the server states it. `state` and `minutesLeft` are computed
+// per read, so a board that has not been refreshed in an hour cannot show a waiting row as
+// still waiting once its window has run out — the refresh interval is the only thing between
+// this and a lie.
+export type CriticalState = 'acknowledged' | 'waiting' | 'breached';
+
+export type CriticalItem = {
+  id: number;
+  studyId: number;
+  reportId: number | null;
+  conditionCode: string;
+  detail: string | null;
+  /** The catalogue label with the reader's own words after it — what the board prints. */
+  text: string;
+  detectedByName: string | null;
+  notifiedAt: string | null;
+  channel: string | null;
+  receiverName: string | null;
+  receiverRole: string | null;
+  receiverPhone: string | null;
+  acknowledgedAt: string | null;
+  acknowledgedByName: string | null;
+  slaMinutes: number;
+  breached: boolean;
+  deadlineAt: string;
+  state: CriticalState;
+  minutesLeft: number | null;
+  late: boolean;
+  mayAcknowledge: boolean;
+  accession: string | null;
+  patientName: string | null;
+  modality: string | null;
+};
+
+export type CriticalCondition = { code: string; label: string; slaMinutes: number };
 
 export type MyReportItem = {
   reportId: number;
@@ -274,6 +314,7 @@ export type DeliveryItem = {
   deliverable: boolean;
   reason: string | null;
   needsSecondName: boolean;
+  openCriticals: number;
 };
 
 export const api = {
@@ -334,8 +375,28 @@ export const api = {
   deliverReport: (id: number) =>
     call<{ report: ReportView }>(`/v1/reports/${id}/deliver`, { method: 'POST', body: '{}' }),
   awaitingDelivery: () => call<{
-    generatedAt: string; counts: { total: number; ready: number }; awaiting: DeliveryItem[];
+    generatedAt: string;
+    counts: { total: number; ready: number; blockedByCritical: number };
+    awaiting: DeliveryItem[];
   }>('/v1/reports/awaiting-delivery'),
+  criticals: (studyId?: number) => call<{
+    generatedAt: string; counts: { open: number; breached: number }; criticals: CriticalItem[];
+  }>(`/v1/criticals${studyId === undefined ? '' : `?studyId=${studyId}`}`),
+  criticalCatalogue: () =>
+    call<{ conditions: CriticalCondition[]; channels: string[] }>('/v1/criticals/catalogue'),
+  // A declaration is made by the reader who found the thing, and it is not a note on the
+  // report: it is a second gate on the document, so the response says so rather than letting
+  // the desk discover it as a refusal two clicks later.
+  declareCritical: (input: {
+    studyId: number; condition: string; channel: string; detail?: string | null;
+    receiverName: string; receiverRole?: string | null; receiverPhone?: string | null;
+  }) => call<{ critical: CriticalItem; blocksDelivery: boolean }>('/v1/criticals', {
+    method: 'POST', body: JSON.stringify(input),
+  }),
+  ackCritical: (id: number, acknowledgedByName: string, acknowledgedByRole?: string | null) =>
+    call<{ critical: CriticalItem; openForStudy: number }>(`/v1/criticals/${id}/ack`, {
+      method: 'POST', body: JSON.stringify({ acknowledgedByName, acknowledgedByRole }),
+    }),
   // Not a fetch: the browser takes the bytes and honours the Content-Disposition the route
   // sets, so the filename is decided by the server that knows the accession.
   pdfHref: (id: number) => `/v1/reports/${id}/pdf`,
