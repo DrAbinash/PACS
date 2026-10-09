@@ -12,8 +12,10 @@ const good: Record<string, string> = {
   TR_ORTHANC_URL: 'http://tr-orthanc:8042',
   TR_ORTHANC_USER: 'telrad-api',
   TR_ORTHANC_PASSWORD: 'ci-orthanc-fixture-not-a-real-credential',
-  TR_SESSION_SECRET: 'Yf7gLm2wRt9kQz4xBn6vcD1aPe8hJs3gUo5iTy7rLk',
-  TR_UPLOAD_SIGNING_SECRET: 'Vq2zNc6xLb9mKj4ghT7yuW1eRt8iOp0aSd3fGh5jKl7zXc',
+  // Fixture values that survive the strong-secret length check without looking like
+  // a real base64 credential to a secret scanner (or to a reader who panics).
+  TR_SESSION_SECRET: 'ci-session-fixture-value-not-a-real-secret-0123456789ab',
+  TR_UPLOAD_SIGNING_SECRET: 'ci-signing-fixture-value-not-a-real-secret-0123456789ab',
   TR_PUBLIC_URL: 'https://telrad.example:8443',
 };
 
