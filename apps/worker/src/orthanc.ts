@@ -38,6 +38,11 @@ export type OrthancReader = {
   /** @returns new instances plus the sequence high-water mark to store as the cursor */
   changes(since: number | null, limit: number): Promise<{ entries: ChangeEntry[]; cursor: number }>;
   read(instanceId: string, seq: number): Promise<InstanceRead>;
+  /** Whether the node considers that study finished arriving. Orthanc flips this about
+   * two minutes after the last instance lands and emits **no change event** for the
+   * flip, so a poller that only reads what `/changes` reports would leave the study
+   * flagged incomplete forever. That is why `recheckStalled` has to ask. */
+  studyStable(nodeStudyPk: string): Promise<boolean>;
 };
 
 const str = (v: unknown): string | undefined => {
@@ -136,6 +141,11 @@ export function createOrthancReader(opts: { baseUrl: string; user: string; passw
         bytes: typeof inst.FileSize === 'number' ? inst.FileSize : null,
         seq,
       };
+    },
+
+    async studyStable(nodeStudyPk) {
+      const stu = await json<{ IsStable: boolean }>(`/studies/${nodeStudyPk}`);
+      return stu.IsStable === true;
     },
   };
 }

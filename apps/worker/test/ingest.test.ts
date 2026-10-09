@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { pollOnce, type StorePort, type StudyDraft } from '../src/ingest.js';
+import { pollOnce, recheckStalled, type StalledStudy, type StorePort, type StudyDraft } from '../src/ingest.js';
 import type { InstanceRead, OrthancReader } from '../src/orthanc.js';
 import type { DicomTags } from '@telrad/shared';
 
@@ -9,6 +9,8 @@ type Captured = {
   events: { studyId: number; kind: string; detail: unknown }[];
   clocks: { studyId: number; deadline: Date }[];
   cursor: number | null;
+  stableAsked: string[];
+  cleared: number[];
 };
 
 function instance(tags: DicomTags, over?: Partial<InstanceRead>): InstanceRead {
@@ -28,8 +30,13 @@ function fakes(opts: {
   instances: InstanceRead[];
   site?: { tenantId: number; siteId: number | null } | null;
   orders?: StorePort['candidateOrders'];
+  stalled?: StalledStudy[];
+  stable?: boolean;
 }) {
-  const cap: Captured = { drafts: new Map(), firstSeen: new Map(), events: [], clocks: [], cursor: null };
+  const cap: Captured = {
+    drafts: new Map(), firstSeen: new Map(), events: [], clocks: [], cursor: null,
+    stableAsked: [], cleared: [],
+  };
   let nextId = 100;
 
   const orthanc: OrthancReader = {
@@ -42,6 +49,10 @@ function fakes(opts: {
     async read(id) {
       const idx = Number(id.slice(1));
       return opts.instances[idx]!;
+    },
+    async studyStable(nodeStudyPk) {
+      cap.stableAsked.push(nodeStudyPk);
+      return opts.stable ?? true;
     },
   };
 
@@ -68,6 +79,13 @@ function fakes(opts: {
       // The unique index on study_id: a second open for the same study changes nothing.
       if (cap.clocks.some((c) => c.studyId === studyId)) return false;
       cap.clocks.push({ studyId, deadline });
+      return true;
+    },
+    async stalledStudies() { return opts.stalled ?? []; },
+    async clearStalledFlag(studyId) {
+      // Mirrors the guarded update: the flag is only there to clear once.
+      if (cap.cleared.includes(studyId)) return false;
+      cap.cleared.push(studyId);
       return true;
     },
   };
@@ -211,5 +229,80 @@ describe('pollOnce', () => {
     await pollOnce(orthanc, store, { nodeId: 'node-test' });
 
     expect([...cap.drafts.keys()]).toEqual(['node:node-test/pk:study-pk-1/i:i0']);
+  });
+});
+
+const stalled = (over: Partial<StalledStudy> = {}): StalledStudy => ({
+  id: 500,
+  nodePk: 'study-pk-1',
+  tenantId: 1,
+  linkState: 'linked',
+  priority: 'urgent',
+  subSpecialtyCode: 'ct-head',
+  qualityFlags: ['study_not_complete'],
+  receivedAt: new Date('2026-10-08T10:00:00Z'),
+  ...over,
+});
+
+// This is the pass that keeps the dispatcher fed. A center that sends a whole study in
+// one batch produces no further change events, so without a re-check the study stays
+// flagged incomplete, and an incomplete study is by design not dispatchable — the queue
+// would silently stop moving while every other signal looked healthy.
+describe('recheckStalled', () => {
+  it('clears the flag and opens the clock from first sight once the node calls it stable', async () => {
+    const { orthanc, store, cap } = fakes({ instances: [], stalled: [stalled()] });
+    const r = await recheckStalled(orthanc, store, { nodeId: 'node-test' });
+
+    expect(r).toEqual({ seen: 1, completed: 1, clocks: 1 });
+    expect(cap.stableAsked).toEqual(['study-pk-1']);
+    expect(cap.cleared).toEqual([500]);
+    expect(cap.clocks[0]!.deadline.getTime()).toBe(new Date('2026-10-08T14:00:00Z').getTime());
+  });
+
+  it('leaves a study alone while the node still calls it in transit', async () => {
+    const { orthanc, store, cap } = fakes({ instances: [], stalled: [stalled()], stable: false });
+    const r = await recheckStalled(orthanc, store, { nodeId: 'node-test' });
+
+    expect(r).toEqual({ seen: 1, completed: 0, clocks: 0 });
+    expect(cap.cleared).toEqual([]);
+  });
+
+  it('does not clock a study that carries another flag as well', async () => {
+    const { orthanc, store, cap } = fakes({
+      instances: [],
+      stalled: [stalled({ qualityFlags: ['study_not_complete', 'motion_artefact'] })],
+    });
+    const r = await recheckStalled(orthanc, store, { nodeId: 'node-test' });
+
+    expect(r).toMatchObject({ completed: 1, clocks: 0 });
+    expect(cap.cleared).toEqual([500]);
+  });
+
+  it('clears an orphan that settled but keeps it out of the clock', async () => {
+    const { orthanc, store, cap } = fakes({
+      instances: [],
+      stalled: [stalled({ linkState: 'orphan', tenantId: null })],
+    });
+    const r = await recheckStalled(orthanc, store, { nodeId: 'node-test' });
+
+    expect(r).toMatchObject({ completed: 1, clocks: 0 });
+    expect(cap.cleared).toEqual([500]);
+  });
+
+  it('is idempotent when two ticks see the same settled study', async () => {
+    const { orthanc, store, cap } = fakes({ instances: [], stalled: [stalled()] });
+    await recheckStalled(orthanc, store, { nodeId: 'node-test' });
+    const second = await recheckStalled(orthanc, store, { nodeId: 'node-test' });
+
+    expect(second).toEqual({ seen: 1, completed: 0, clocks: 0 });
+    expect(cap.clocks).toHaveLength(1);
+  });
+
+  it('skips a row the node never gave a study key', async () => {
+    const { orthanc, store, cap } = fakes({ instances: [], stalled: [stalled({ nodePk: null })] });
+    const r = await recheckStalled(orthanc, store, { nodeId: 'node-test' });
+
+    expect(r).toEqual({ seen: 0, completed: 0, clocks: 0 });
+    expect(cap.stableAsked).toEqual([]);
   });
 });

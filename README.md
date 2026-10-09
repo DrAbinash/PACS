@@ -4,13 +4,14 @@ Multi-center tele-radiology service: diagnostic centers push studies in, cases
 distribute to contracted radiologists reading from anywhere, reports come back
 signed by two names and are billed per center.
 
-**Status: P1 channels proven, console started.** A study can arrive by C-STORE or by
+**Status: P1 channels proven; the panel routes.** A study can arrive by C-STORE or by
 an upload batch from a center's agent token, be attributed to its tenant, linked to
 its order, and carry an SLA clock; a study that matches nothing waits in the orphan
-queue where a person can link it. The first console screen exists: the on-panel board
-that shows which readers are routable right now. There is still no worklist, no
-viewer, no assignment, no report and no money. Nothing in here has received a patient
-study. The inventory at the end of
+queue where a person can link it. The console shows which readers are routable right
+now, and the dispatcher offers a case **only** to a green reader whose profile covers
+it — accept it, decline it with a reason, or let the offer lapse and rotate. There is
+still no viewer, no report and no money, and nothing pages a person when a case cannot
+be routed. Nothing in here has received a patient study. The inventory at the end of
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) is the honest state.
 
 Standalone product. It is not a CARE ERP module, it does not call the FutureKind
@@ -23,7 +24,7 @@ borrowed thing is deployment technique: Orthanc + OHIF + Synology Docker, the wa
 | Surface | User | Content |
 | --- | --- | --- |
 | Ingest edge | center's modality or uploader | Orthanc C-STORE, watched folders, browser upload |
-| Worklist | radiologist | assignment queue with padlock, auto-next, SLA countdown |
+| Worklist | radiologist | offers with a padlock, accept or decline-with-a-reason, lapse countdown; no viewer, no auto-next yet |
 | Report desk | radiologist, reviewer | draft → sign → countersign → deliver → amend |
 | Console | owner, center admin | tenants, tariffs, rosters, QC, invoices, payouts |
 

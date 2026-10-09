@@ -1,10 +1,11 @@
 import { and, eq, gte, inArray, lte, or, sql } from 'drizzle-orm';
 import type { Db } from '@telrad/db';
 import {
-  ingestCursors, ingestEvents, orders, patients, slaClocks, studies, subSpecialties, tenantSites, uploadBatches,
-  uploadFiles,
+  assignments, dispatchableStudies, ingestCursors, ingestEvents, offerHistory, orders, panelReaders, patients, slaClocks,
+  studies, subSpecialties, tenantSites, uploadBatches, uploadFiles,
 } from '@telrad/db';
 import { LIMITS, type Priority } from '@telrad/shared';
+import type { DispatchPort } from './dispatch.js';
 import type { OrderCandidate, StorePort } from './ingest.js';
 import type { InboxStore } from './inbox.js';
 import { attributeByBatch, batchIdsFromLabels } from './labels.js';
@@ -192,6 +193,43 @@ export function createStore(db: Db, nodeId: string): StorePort {
         .returning({ id: slaClocks.id });
       return inserted.length > 0;
     },
+
+    async stalledStudies(nodeId, limit) {
+      return db.select({
+        id: studies.id,
+        nodePk: studies.nodePk,
+        tenantId: studies.tenantId,
+        linkState: studies.linkState,
+        priority: studies.priority,
+        subSpecialtyCode: studies.subSpecialtyCode,
+        qualityFlags: studies.qualityFlags,
+        receivedAt: studies.receivedAt,
+      }).from(studies)
+        .where(and(
+          eq(studies.storageNodeId, nodeId),
+          sql`${studies.qualityFlags} @> '["study_not_complete"]'::jsonb`,
+        ))
+        .orderBy(studies.receivedAt)
+        .limit(limit);
+    },
+
+    async clearStalledFlag(studyId) {
+      // Rebuilds the array without the one flag rather than clearing the column: a
+      // study can be incomplete *and* carry a human's quality flag, and the second
+      // one is clinical information that this housekeeping pass must not touch.
+      const rows = await db.update(studies)
+        .set({
+          qualityFlags: sql`(select coalesce(jsonb_agg(f.value), '[]'::jsonb)
+                              from jsonb_array_elements_text(${studies.qualityFlags}) f
+                             where f.value <> 'study_not_complete')`,
+        })
+        .where(and(
+          eq(studies.id, studyId),
+          sql`${studies.qualityFlags} @> '["study_not_complete"]'::jsonb`,
+        ))
+        .returning({ id: studies.id });
+      return rows.length > 0;
+    },
   };
 }
 
@@ -206,6 +244,48 @@ function shiftDate(dicom: string | undefined, days: number): Date | null {
   const base = Date.parse(`${dicom.slice(0, 4)}-${dicom.slice(4, 6)}-${dicom.slice(6, 8)}T00:00:00Z`);
   if (Number.isNaN(base)) return null;
   return new Date(base + days * 86_400_000);
+}
+
+export function createDispatchStore(db: Db): DispatchPort {
+  return {
+    // The queue and the panel are read through @telrad/db because the console answers
+    // "why is this case unassigned" with the same two reads, and the two must not be
+    // able to disagree about what the queue is.
+    async queue(limit) {
+      return dispatchableStudies(db, { limit });
+    },
+
+    async panel(tenantIds, now) {
+      return panelReaders(db, tenantIds, now);
+    },
+
+    async offersByStudy(studyIds) {
+      return offerHistory(db, studyIds);
+    },
+
+    async offer(studyId, tenantId, userId, attemptNo, now) {
+      const inserted = await db.insert(assignments)
+        .values({ studyId, tenantId, clinicianUserId: userId, state: 'offered', attemptNo, offeredAt: now })
+        .onConflictDoNothing()
+        .returning({ id: assignments.id });
+      return inserted.length > 0;
+    },
+
+    async expireUnaccepted(cutoff) {
+      // The row is kept rather than deleted, and the reason is written: "who was
+      // offered this at 02:10 and did not take it" is a question whose answer is
+      // already in the table, and a re-offer that overwrote it would lose it.
+      const rows = await db.execute<{ id: number }>(sql`
+        update telrad.assignments set state = 'returned', returned_at = now(), return_reason = 'offer_expired'
+         where id in (
+           select id from telrad.assignments
+            where state = 'offered' and offered_at < ${cutoff.toISOString()}::timestamptz
+            for update skip locked
+         )
+        returning id`);
+      return rows.length;
+    },
+  };
 }
 
 export function createInboxStore(db: Db): InboxStore {

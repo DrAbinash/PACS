@@ -13,7 +13,7 @@ import datetime
 import os
 
 from pydicom.dataset import Dataset, FileMetaDataset
-from pydicom.uid import CTImageStorage, generate_uid
+from pydicom.uid import CTImageStorage, SecondaryCaptureImageStorage, generate_uid
 from pydicom import __version__ as pydicom_version
 
 OUT_DIR = os.environ.get("OUT_DIR", "/v/out")
@@ -25,23 +25,30 @@ PATIENT_NAME = os.environ.get("PATIENT_NAME", "Ramesh^Kumar")
 PATIENT_BIRTH = os.environ.get("PATIENT_BIRTH", "19780412")
 STATION_AET = os.environ.get("STATION_AET", "CT_SCANNER_1")
 COUNT = int(os.environ.get("INSTANCE_COUNT", "3"))
+MODALITY = os.environ.get("MODALITY", "CT")
+BODY_PART = os.environ.get("BODY_PART", "HEAD")
+STUDY_DESC = os.environ.get("STUDY_DESC", "CT HEAD")
+SERIES_DESC = os.environ.get("SERIES_DESC", "HEAD NATIVE")
+# Secondary capture is the storage class a digital radiography plate writes; a CT
+# SOP class with Modality=DX would be a file Orthanc accepts and no real PACS sends.
+SOP_CLASS = CTImageStorage if MODALITY in ("CT", "MR", "NM") else SecondaryCaptureImageStorage
 STUDY_DATE = os.environ.get("STUDY_DATE", datetime.date.today().strftime("%Y%m%d"))
 
 
 def build(number: int) -> Dataset:
     meta = FileMetaDataset()
-    meta.MediaStorageSOPClassUID = CTImageStorage
+    meta.MediaStorageSOPClassUID = SOP_CLASS
     meta.MediaStorageSOPInstanceUID = generate_uid()
     meta.TransferSyntaxUID = "1.2.840.10008.1.2.1"  # explicit VR little endian
     meta.ImplementationVersionName = "TELRADTEST"
 
     ds = Dataset()
     ds.file_meta = meta
-    ds.SOPClassUID = CTImageStorage
+    ds.SOPClassUID = SOP_CLASS
     ds.SOPInstanceUID = meta.MediaStorageSOPInstanceUID
     ds.StudyInstanceUID = STUDY_UID
     ds.SeriesInstanceUID = SERIES_UID
-    ds.Modality = "CT"
+    ds.Modality = MODALITY
     ds.Manufacturer = "Synthetic Vendor"
     ds.InstitutionName = "Demo Clinic"
     ds.StationAETitle = STATION_AET
@@ -52,9 +59,9 @@ def build(number: int) -> Dataset:
     ds.PatientSex = "M"
     ds.StudyDate = STUDY_DATE
     ds.StudyTime = "093000"
-    ds.StudyDescription = "CT HEAD"
-    ds.SeriesDescription = "HEAD NATIVE"
-    ds.BodyPartExamined = "HEAD"
+    ds.StudyDescription = STUDY_DESC
+    ds.SeriesDescription = SERIES_DESC
+    ds.BodyPartExamined = BODY_PART
     ds.Rows = 4
     ds.Columns = 4
     ds.SamplesPerPixel = 1

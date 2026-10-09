@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 import {
-  auditLog, escalationRules, modalities, openDb, storageNodes, subSpecialties,
+  auditLog, clinicianProfiles, escalationRules, modalities, openDb, storageNodes, subSpecialties,
   tenants, users,
 } from '@telrad/db';
 import { auditRowHash, hashPassword } from '@telrad/shared';
@@ -9,12 +9,18 @@ type Args = Record<string, string | boolean>;
 
 function parse(argv: string[]): Args {
   const out: Args = {};
+  const stray: string[] = [];
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
-    if (!a?.startsWith('--')) continue;
+    if (!a?.startsWith('--')) { stray.push(a ?? ''); continue; }
     const key = a.slice(2);
     const next = argv[i + 1];
     if (next && !next.startsWith('--')) { out[key] = next; i += 1; } else { out[key] = true; }
+  }
+  // An unquoted `--name Dr Second` otherwise arrives as name="Dr" and the account is
+  // created with a truncated name that nobody notices until a board reads it wrong.
+  if (stray.length > 0) {
+    throw new Error(`unexpected argument(s): ${stray.join(' ')} — quote a value with spaces or put it directly after its --flag`);
   }
   return out;
 }
@@ -211,12 +217,80 @@ async function verifyAudit() {
   }
 }
 
+// A reader who cannot be provisioned cannot be routed to, so this is the second half
+// of the dispatcher rather than a convenience. Coverage is required: the routing rule
+// reads an empty list as "covers nothing", and an account created that way would sit on
+// the panel looking green and never receive a case.
+function splitList(value: string): string[] {
+  return value.split(',').map((s) => s.trim().toUpperCase() === 'ALL' ? '*' : s.trim()).filter((s) => s.length > 0);
+}
+
+const READER_ROLES = ['radiologist', 'reviewer'];
+
+async function addReader(args: Args) {
+  const handle = openDb(dbUrl());
+  const { db } = handle;
+  try {
+    const email = need(args, 'email').toLowerCase();
+    const displayName = need(args, 'name');
+    const password = need(args, 'password');
+    checkPasswordStrength(password);
+
+    const role = String(args.role ?? 'radiologist');
+    if (!READER_ROLES.includes(role)) throw new Error(`role must be one of ${READER_ROLES.join(', ')}`);
+    const subs = splitList(need(args, 'subs'));
+    const mods = splitList(need(args, 'mods'));
+    if (subs.length === 0 || mods.length === 0) throw new Error('--subs and --mods must each list at least one code (or *)');
+    const maxQueue = Number(args['max-queue'] ?? 5);
+    if (!Number.isInteger(maxQueue) || maxQueue < 1 || maxQueue > 50) throw new Error('--max-queue must be an integer from 1 to 50');
+    const grade = String(args.grade ?? 'junior');
+    if (!['junior', 'senior', 'chief'].includes(grade)) throw new Error('--grade must be junior, senior or chief');
+    const tenantId = args.tenant === undefined ? null : Number(args.tenant);
+    if (tenantId !== null && !Number.isInteger(tenantId)) throw new Error('--tenant must be an id or omitted for a platform reader');
+
+    const clash = await db.execute<{ n: string }>(
+      sql`select count(*)::text as n from telrad.users where lower(email) = ${email}`,
+    );
+    if (clash[0]?.n !== '0') throw new Error(`${email} already exists; add-reader never resets a password`);
+
+    const [reader] = await db.insert(users).values({
+      email,
+      displayName,
+      role: role as 'radiologist' | 'reviewer',   // narrowed by the check above
+      tenantId,
+      passwordHash: await hashPassword(password),
+      passwordAlgo: 'scrypt',
+      status: 'active',
+    }).returning();
+    if (!reader) throw new Error('user insert returned nothing');
+
+    await db.insert(clinicianProfiles).values({
+      userId: reader.id,
+      registrationCouncil: need(args, 'council'),
+      registrationNumber: need(args, 'reg-no'),
+      stateCodes: splitList(need(args, 'states')),
+      grade: grade as 'junior' | 'senior' | 'chief',
+      subspecialtyCodes: subs,
+      modalityCodes: mods,
+      maxQueueSize: maxQueue,
+      acceptsNight: args['no-night'] ? false : true,
+    });
+
+    console.log(`reader ${email} id=${reader.id} role=${role} tenant=${tenantId ?? 'platform'} `
+      + `subs=${subs.join('|')} mods=${mods.join('|')} max=${maxQueue} night=${args['no-night'] ? 'no' : 'yes'}`);
+  } finally {
+    await handle.close();
+  }
+}
+
 const command = process.argv[2];
 if (command === 'bootstrap') {
   await bootstrap(parse(process.argv.slice(3)));
+} else if (command === 'add-reader') {
+  await addReader(parse(process.argv.slice(3)));
 } else if (command === 'verify-audit') {
   await verifyAudit();
 } else {
-  console.error('usage: telrad-api <bootstrap|verify-audit> [--flags]');
+  console.error('usage: telrad-api <bootstrap|add-reader|verify-audit> [--flags]');
   process.exitCode = 2;
 }

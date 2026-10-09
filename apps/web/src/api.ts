@@ -54,6 +54,25 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
+export type WorkCase = {
+  assignmentId: number;
+  studyId: number;
+  state: 'offered' | 'accepted' | 'reading';
+  offeredAt: string;
+  acceptedAt: string | null;
+  expiresAt: string | null;
+  attemptNo: number;
+  priority: 'stat' | 'urgent' | 'routine';
+  modality: string | null;
+  subSpecialty: string | null;
+  accession: string | null;
+  patientName: string | null;
+  patientMrn: string | null;
+  studyDescription: string | null;
+  receivedAt: string;
+  waitingMinutes: number;
+};
+
 export const api = {
   session: () => call<Session>('/v1/auth/session'),
   login: (email: string, password: string) =>
@@ -65,4 +84,11 @@ export const api = {
   declare: (state: string) =>
     call<{ ok: boolean; state: string }>('/v1/presence', { method: 'PATCH', body: JSON.stringify({ state }) }),
   panel: () => call<Panel>('/v1/panel'),
+  myWork: () => call<{ cases: WorkCase[]; offerWindowSeconds: number }>('/v1/my/work'),
+  accept: (id: number) =>
+    call<{ ok: boolean; studyId: number; lockToken: string }>(`/v1/assignments/${id}/accept`, { method: 'POST', body: '{}' }),
+  decline: (id: number, reason: string) =>
+    call<{ ok: boolean; studyId: number }>(`/v1/assignments/${id}/decline`, {
+      method: 'POST', body: JSON.stringify({ reason }),
+    }),
 };

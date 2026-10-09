@@ -72,18 +72,45 @@ the only place a path appears.
   three days in the orphan queue are never converted into three days of fresh time.
 - A report is versioned by insertion. Amendment writes version n+1 signed by a
   strictly higher grade; the old row keeps its signature pair.
+- **An offer is not a lock.** The dispatcher puts a case in a reader's queue; only
+  `POST /v1/assignments/:id/accept`, called by that reader, writes `accepted_at` and
+  mints the lock token. Nobody can be assigned work they have not taken, and the token
+  is returned exactly once — a worklist that re-echoed it would make a screenshot a
+  credential. An offer nobody accepts lapses (5 minutes) and rotates, and a rotation
+  never re-asks the same reader for the same case.
+- Coverage is a claim, not a default. `clinician_profiles.sub_specialty_codes` and
+  `modality_codes` gate routing, and **an empty list routes nothing**; `*` is the only
+  way to say "everything". A profile nobody filled in must not quietly become the
+  reader who receives every spine MRI.
+- A study is re-read for completeness rather than trusted from one look. Orthanc flips
+  `IsStable` about two minutes after the last instance and emits **no change event** for
+  the flip, so `recheckStalled` asks `/studies/{pk}` again for anything still flagged
+  `study_not_complete`. Without that pass a center that uploads a whole study in one
+  batch is filed, flagged and never looked at again — and because an incomplete study is
+  deliberately not dispatchable, the routing queue would stop moving while every other
+  signal still looked healthy. This was found by running the dispatcher, not by reading
+  the code.
 
 ## Known open items, stated rather than implied
 
 - **One failed query takes the whole api down.** Express 4 does not catch a rejected
   promise from an `async` handler, so a database error inside any route becomes an
-  unhandled rejection and Node exits the process. This was measured, not theorised: a
-  `Date` passed through a raw `sql` template made postgres.js throw while encoding the
-  parameter, and the api died on the first panel read. `restart: unless-stopped` hides
-  it as a two-second blip and the in-flight requests of every connected reader fail
-  with it. The fix is a `ah()` wrapper that forwards rejections to `next(err)` at
-  every route registration — mechanical, ~25 call sites, deliberately not done in a
-  hurry. Until it is, `/health/ready` plus a restart count is the only evidence.
+  unhandled rejection and Node exits the process. This has now happened twice, in the
+  same way, in code I wrote: a `Date` interpolated into a raw `sql` template reaches
+  postgres.js untyped and throws while encoding the parameter. The first was the panel
+  read; the second was the dispatcher's roster subquery a week later, which killed the
+  api mid-verification. `restart: unless-stopped` hides it as a two-second blip and the
+  in-flight requests of every connected reader fail with it. The fix is a `ah()` wrapper
+  that forwards rejections to `next(err)` at every route registration — mechanical,
+  ~30 call sites, deliberately not done in a hurry. Until it is, `/health/ready` plus a
+  restart count is the only evidence, and **any new raw `sql` fragment that takes a
+  timestamp must bind `date.toISOString()` with an explicit `::timestamptz` cast.**
+- **Nothing escalates a case nobody took.** `escalation_rules` and
+  `sla_clocks.escalation_stage` exist, `bootstrap` seeds three stages (widen_pool at
+  55 %, alert_ops at 75 %, manual_assign at 92 %), and no code reads them. A study whose
+  only eligible reader has already been asked stays in `/v1/dispatch/unassigned` with
+  `already_offered` as its explanation forever. That is the honest current behaviour —
+  the alternative is a timer that pages somebody on a rule nobody has agreed yet.
 - **A router mounted at `/v1` guards paths it does not own.** `r.use(requireAuth)`
   inside such a router runs for *every* `/v1/...` request, so a radiologist polling
   `/v1/presence` was answered 403 by the sites router's owner-only check, and an agent
@@ -173,7 +200,12 @@ schedule, which is why retention is data and not a constant.
 | `compose.yaml`, `infra/caddy/Caddyfile` | `docker compose config` interpolates; **Caddy and the profiles have not been run** |
 | `apps/web` console — the on-panel board | Built and **seen in a browser**: four seeded readers rendered red with "No signal · last signal 3m ago" after their heartbeats stopped, then Dr Anitha flipped to green "On panel" and sorted to the top **without a page reload** on the five-second refresh. Verified through the DOM (structure, counts, per-row reason); a screenshot was not available from this browser session, so the visual layout has not been reviewed by a human eye |
 | `apps/api` presence endpoints | **Proven live**: `POST /presence/heartbeat` → green; a heartbeat *after* declaring `paused` stays amber, so presence cannot be refreshed back into availability; a reader holding one case with `max_queue_size = 1` → amber `at_cap`; `last_seen_at` backdated five minutes → red `idle` while `reader_availability.state` still reads `receiving`, which is the whole point; no session → 401, a non-reader session → 403 |
-| Console worklist, viewer, assignment and escalation execution, reports, delivery, billing | **Not built.** The board says who is routable; nothing consumes that answer yet |
+| Routing rule (`packages/shared/src/dispatch.ts`) | Built, 21 assertions: colour, tenant reach, coverage (empty = nothing, `*` = everything), night window against the tenant's own zone, capacity, and rotation past readers already asked. Ties break on fewest open cases, then roster, then whoever waited longest. `readerPresence` is the same function the board calls, so a reader the board paints amber is not offered work |
+| `apps/worker` dispatch sweep + offer expiry | **Proven live** with three studies on the real upload channel and five seeded readers: the STAT head CT went to Dr Green, the routine head CT to Dr Second *in the same tick* (Green was already holding one, and the sweep counts the offers it has just made), the chest to Dr Chest whom nobody else covers; Dr Paused (amber) and Dr Gone (declared `receiving`, no heartbeat for three hours) received nothing. A lapsed offer was withdrawn and rotated to Green as `attempt_no = 2` |
+| `apps/api` accept / decline / my-work / unassigned | **Proven live over HTTP and in the browser**: accept returned a one-time lock token, wrote `assignments.accepted_at` *and* `sla_clocks.accepted_at`; a second accept got 409 `not_offered`; another reader's assignment answered 404, not 403; decline without a reason got 422 and with one released the case. `GET /v1/dispatch/unassigned` named the real gap on the declined chest study: `Dr Chest — already_offered`. Dr Second accepted through the console's own Accept button and the row moved to `accepted` |
+| Reader provisioning (`cli add-reader`) | Built and used by the verification. Requires coverage lists, and refuses a stray argument: an unquoted `--name Dr Second` used to create an account called "Dr", which then won the alphabetical tie-break for the STAT case. Real routing bug, found through a real CLI trap |
+| Console worklist for the reader | Built and **seen in the browser**: "Your cases" renders the live offer with Accept and Decline, a per-second countdown to the lapse, and the patient/modality/accession line; Accept was clicked and the database row confirmed `accepted` with a lock token. Layout has not been reviewed as an image — this browser gives no viewport |
+| Viewer, escalation execution, reports, delivery, billing | **Not built.** The dispatcher routes, the reader accepts, and there is no image viewer to read the case in yet; nothing pages a person when a case cannot be routed |
 
 Nothing in this repository has processed a patient study. The studies it has
 processed were invented by `scripts/validation/send-test-study.py`.

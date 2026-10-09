@@ -107,6 +107,24 @@ Bootstrap refuses a password under 14 characters and refuses to overwrite an
 existing address. It writes the first row of the audit chain, so
 `pnpm verify-audit` should report one row and `broken=0`.
 
+**Then provision the readers, because nothing routes without them.** Coverage is a
+claim, not a default: an account with no `--subs`/`--mods` list exists and is never
+offered a case, and `*` is the only way to say a reader covers everything. `--tenant
+<id>` binds a reader to one center; omitting it makes them a platform reader who can be
+routed work from any center. Quote a name that contains a space — the CLI now refuses a
+stray argument rather than silently creating an account called `Dr`:
+
+```bash
+docker compose exec api node apps/api/dist/cli.js add-reader \
+  --email radiologist@domain --name "Dr Full Name" --password '<long passphrase>' \
+  --council WBMC --reg-no WB-12345 --states WB --grade senior \
+  --subs ct-head,mr-spine --mods CT,MR --max-queue 4
+```
+
+A reader only reaches the panel by signing in to the console and leaving the tab open:
+the page sends a heartbeat every twenty seconds, and the colour goes red about ninety
+seconds after the tab dies. Nobody is "on panel" because an account exists.
+
 ## 6. Register the site and prove ingest with your own scanner
 
 The AE title you register is the one Orthanc reports as having **sent** the study
@@ -228,6 +246,23 @@ What has to be true on the board:
 - a reader whose open cases equal their `max_queue_size` shows **amber "At
   capacity"**, which is a different fact from "gone" and is coloured differently;
 - with nobody green, the board says so in a banner rather than showing an empty table.
+
+The routing that reads that board runs in the worker, on the same poll interval. What
+has to be true of it:
+
+- a case is offered only to a reader who is **green and covers it**. To check: leave one
+  green reader, one amber and one red on the board, send a study in, and confirm only the
+  green one gets an entry under "Your cases" — the amber and red readers must show
+  nothing;
+- an offer nobody accepts lapses after five minutes and goes to somebody else, and the
+  same reader is never asked twice for the same case;
+- when nobody qualifies, `GET /v1/dispatch/unassigned` says which reader came closest and
+  what they were missing (`not_routable`, `no_subspecialty_cover`, `queue_full`,
+  `already_offered`). "Unassigned" is never a mystery;
+- a study that is still arriving is **not** dispatched. Because Orthanc flips a study to
+  stable without announcing it, the worker re-asks; if a study sits in the queue with
+  `study_not_complete` for more than a few minutes, that re-check is what to look at
+  first.
 
 ## 9. Prove the negative cases before trusting the pipeline
 

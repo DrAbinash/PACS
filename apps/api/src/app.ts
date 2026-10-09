@@ -10,6 +10,7 @@ import { orphansRouter } from './routes/orphans.js';
 import { presenceRouter } from './routes/presence.js';
 import { sitesRouter } from './routes/sites.js';
 import { uploadsRouter } from './routes/uploads.js';
+import { worklistRouter } from './routes/worklist.js';
 
 const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
 const MAX_FAILED = 5;
@@ -227,6 +228,7 @@ export function createApp(deps: AppDeps): Express {
   app.use('/v1', sitesRouter(db));
   app.use('/v1', orphansRouter(db));
   app.use('/v1', presenceRouter(db));
+  app.use('/v1', worklistRouter(db));
 
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     // Never echo an exception message: it can carry a connection string or a

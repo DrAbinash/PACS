@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { api, ApiError, type Panel, type PanelRow, type PresenceColor, type Session } from './api';
+import { api, ApiError, type Panel, type PanelRow, type PresenceColor, type Session, type WorkCase } from './api';
 
 const HEARTBEAT_MS = 20_000;
 const REFRESH_MS = 5_000;
@@ -41,6 +41,106 @@ function Login({ onSignedIn }: { onSignedIn: (s: Session) => void }) {
       <button className="primary" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
       {error && <span className="error">{error}</span>}
     </form>
+  );
+}
+
+function Worklist({ onChanged }: { onChanged: () => void }) {
+  const [cases, setCases] = useState<WorkCase[]>([]);
+  const [declining, setDeclining] = useState<number | null>(null);
+  const [reason, setReason] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [, setTick] = useState(0);
+
+  const load = useCallback(async () => {
+    try {
+      setCases((await api.myWork()).cases);
+      setError(null);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) return;
+      setError(err instanceof ApiError ? err.message : 'cannot reach the server');
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+    const poll = setInterval(() => void load(), REFRESH_MS);
+    // A countdown that only moves every five seconds looks like a frozen one, and an
+    // offer about to lapse is the case a reader most needs an honest clock for.
+    const second = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => { clearInterval(poll); clearInterval(second); };
+  }, [load]);
+
+  async function accept(id: number) {
+    setError(null);
+    try {
+      await api.accept(id);
+      await load();
+      onChanged();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'cannot reach the server');
+    }
+  }
+
+  async function decline(id: number) {
+    if (!reason.trim()) return;
+    setError(null);
+    try {
+      await api.decline(id, reason.trim());
+      setDeclining(null);
+      setReason('');
+      await load();
+      onChanged();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'cannot reach the server');
+    }
+  }
+
+  function left(c: WorkCase): string | null {
+    if (!c.expiresAt) return null;
+    const secs = Math.max(0, Math.round((new Date(c.expiresAt).getTime() - Date.now()) / 1000));
+    return `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
+  }
+
+  return (
+    <div className="card">
+      <h2>Your cases</h2>
+      {error && <div className="error">{error}</div>}
+      {cases.length === 0 && !error && <div className="sub">Nothing is held by you right now.</div>}
+      {cases.map((c) => {
+        const remaining = left(c);
+        return (
+          <div className="workcase" key={c.assignmentId}>
+            <span className={`priority ${c.priority}`}>{c.priority}</span>
+            <div className="who">
+              <strong>{c.patientName ?? 'name not carried in the study'}</strong>
+              <div className="sub">
+                {c.modality} · {c.subSpecialty} · {c.accession ?? 'no accession'} · waiting {c.waitingMinutes} min
+              </div>
+              <div className="sub">
+                {c.state === 'offered'
+                  ? `offer lapses in ${remaining ?? '0:00'}${c.attemptNo > 1 ? ` · attempt ${c.attemptNo}` : ''}`
+                  : `held since ${c.acceptedAt ? new Date(c.acceptedAt).toLocaleTimeString() : '—'}`}
+              </div>
+            </div>
+            {c.state === 'offered' && declining !== c.assignmentId && (
+              <span className="acts">
+                <button className="primary" onClick={() => void accept(c.assignmentId)}>Accept</button>
+                <button onClick={() => { setDeclining(c.assignmentId); setReason(''); }}>Decline</button>
+              </span>
+            )}
+            {declining === c.assignmentId && (
+              <span className="acts">
+                <input placeholder="why (required)" value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') void decline(c.assignmentId); }} />
+                <button className="primary" disabled={!reason.trim()} onClick={() => void decline(c.assignmentId)}>Send back</button>
+                <button onClick={() => setDeclining(null)}>Keep</button>
+              </span>
+            )}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -196,6 +296,8 @@ export default function App() {
             </span>
           </div>
         )}
+
+        {isReader && <Worklist onChanged={() => { void refresh(); }} />}
 
         {counts.green === 0 && !feedError && (
           <div className="banner">Nobody is routable right now. Anything waiting will wait.</div>

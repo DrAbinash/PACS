@@ -47,6 +47,24 @@ export type StorePort = {
   /** False when a clock already exists, which is what makes this safe to ask for on
    * every poll. */
   openSlaClock(studyId: number, tenantId: number, priority: Priority, deadlineAt: Date): Promise<boolean>;
+  /** Studies this node filed as still arriving. Orthanc flips a study to stable about
+   * two minutes after the last instance and emits no change event for the flip, so
+   * these will never be looked at again unless somebody asks. */
+  stalledStudies(nodeId: string, limit: number): Promise<StalledStudy[]>;
+  /** Drops the 'study_not_complete' flag and nothing else. False when the flag was
+   * already gone, which is what keeps a concurrent re-check from doubling the clock. */
+  clearStalledFlag(studyId: number): Promise<boolean>;
+};
+
+export type StalledStudy = {
+  id: number;
+  nodePk: string | null;
+  tenantId: number | null;
+  linkState: 'linked' | 'orphan' | 'ambiguous' | 'unlinked_read_only';
+  priority: Priority;
+  subSpecialtyCode: string | null;
+  qualityFlags: string[];
+  receivedAt: Date;
 };
 
 export type IngestResult = {
@@ -192,4 +210,47 @@ export async function pollOnce(
     await store.failCursor(err instanceof Error ? err.message : String(err));
     throw err;
   }
+}
+
+export type SettleResult = { seen: number; completed: number; clocks: number };
+
+// The second look a study gets when nothing new arrived to make the poller read it
+// again. Without this, a center that sends a whole study in one batch is filed as
+// incomplete, stays incomplete forever, and — since an incomplete study is not
+// dispatchable — never reaches a radiologist. Measured, not theoretical: the first
+// dispatch run produced three studies with two instances each and none of them ever
+// left the stalled set.
+export async function recheckStalled(
+  orthanc: OrthancReader,
+  store: StorePort,
+  opts: { nodeId: string; limit?: number },
+): Promise<SettleResult> {
+  const r: SettleResult = { seen: 0, completed: 0, clocks: 0 };
+
+  for (const row of await store.stalledStudies(opts.nodeId, opts.limit ?? 20)) {
+    if (!row.nodePk) continue;
+    r.seen += 1;
+    if (!(await orthanc.studyStable(row.nodePk))) continue;
+
+    if (!(await store.clearStalledFlag(row.id))) continue;
+    r.completed += 1;
+
+    // The clock opens from first sight, exactly as it does on the ingest path, so a
+    // study that took two minutes to settle is not given those two minutes back.
+    if (row.tenantId !== null && row.linkState === 'linked') {
+      const remaining = row.qualityFlags.filter((f) => f !== 'study_not_complete');
+      if (remaining.length === 0) {
+        const minutes = await store.slaMinutesFor(row.subSpecialtyCode, row.priority);
+        if (minutes) {
+          const opened = await store.openSlaClock(
+            row.id, row.tenantId, row.priority,
+            new Date(row.receivedAt.getTime() + minutes * 60_000),
+          );
+          if (opened) r.clocks += 1;
+        }
+      }
+    }
+  }
+
+  return r;
 }
