@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: telrad
+          POSTGRES_USER: telrad
+          POSTGRES_PASSWORD: ci-only-not-a-secret
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U telrad"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 8
+    env:
+      TR_DB_URL: postgresql://telrad:ci-only-not-a-secret@127.0.0.1:5432/telrad
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      # vitest transpiles without type-checking, so a test that no longer matches an
+      # interface passes CI while telling nobody that the contract moved.
+      - run: pnpm typecheck:test
+      - run: pnpm lint
+      - run: pnpm test
+      # Generated SQL is part of the product: an uncommitted schema change should
+      # fail here rather than at a deployment.
+      - run: pnpm db:generate && git diff --exit-code packages/db/migrations
+      # Applies every migration against a real Postgres and asserts the refusal to
+      # touch `public`. This is the step that proves the schema is deployable.
+      - run: pnpm db:migrate
+      - run: pnpm --filter @telrad/api exec node --input-type=module -e "1"
+      - run: bash scripts/doctor/check-secrets.sh
+      - run: bash scripts/doctor/check-config.sh

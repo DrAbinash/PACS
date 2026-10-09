@@ -1,0 +1,178 @@
+name: telrad
+
+# One compose tree, two targets. `--profile nas` is today's Synology deployment;
+# `--profile cloud` is the same services on one VM once the first customer signs.
+# Nothing else changes: no service may assume it is running on the NAS, and the
+# only file that differs is which host ports get published.
+#
+# Ports deliberately avoid what is already taken on the owner's NAS:
+#   5000/5001 DSM · 80/443 Web Station · 8888 CARE api · 5680+8042 care-orthanc ·
+#   3010 care-ohif · 187 tailscale-ohif · 11434 Ollama · (FutureKind would want 8100/3000/6333)
+# Re-measure with `sudo netstat -tlnp` before assuming this table.
+
+x-runtime: &runtime
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+
+services:
+
+  db:
+    image: postgres:16-alpine
+    container_name: tr-db
+    <<: *runtime
+    profiles: ["nas", "cloud"]
+    environment:
+      POSTGRES_DB: ${TR_DB_NAME}
+      POSTGRES_USER: ${TR_DB_USER}
+      POSTGRES_PASSWORD: ${TR_DB_PASSWORD}
+      POSTGRES_INITDB_ARGS: --data-checksums --encoding=UTF8
+      TZ: UTC
+    volumes:
+      - ${TR_RUNTIME}/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${TR_DB_USER} -d ${TR_DB_NAME}"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    networks: [telrad]
+    # No published port. `scripts/doctor/check-exposure.sh` fails the deployment
+    # if a Postgres socket is reachable on any interface. For operator psql:
+    #   docker compose exec db psql -U ${TR_DB_USER} -d ${TR_DB_NAME}
+
+  orthanc:
+    # Pinned by digest rather than by tag, and the reason is measured: orthancteam
+    # publishes CalVer tags (26.9.1, latest) and there is no "1.13.0" tag to pull —
+    # 1.13.0 is the Orthanc build *inside* this image, which `GET /system` reports.
+    # A .env that said ORTHANC_IMAGE_TAG=1.13.0 fails any pull with "not found"
+    # (measured). This digest resolves today and is the container every ingest
+    # claim in docs/ARCHITECTURE.md was verified against. Re-check before changing:
+    #   docker manifest inspect orthancteam/orthanc@<digest>
+    image: orthancteam/orthanc@${ORTHANC_IMAGE_DIGEST}
+    container_name: tr-orthanc
+    <<: *runtime
+    profiles: ["nas", "cloud"]
+    environment:
+      # Verified against a running 1.13.0: with HTTP authentication enabled and no
+      # user declared, the image refuses to start unless a credential is supplied
+      # this way. The REST username is therefore "orthanc".
+      ORTHANC_PASSWORD: ${TR_ORTHANC_PASSWORD}
+      TZ: UTC
+    volumes:
+      - ${TR_RUNTIME}/orthanc:/var/lib/orthanc/db
+      - ./infra/orthanc/orthanc.json:/etc/orthanc/orthanc.json:ro
+    ports:
+      # The image plane. C-STORE arrives here; the REST/DICOMweb port is never
+      # published, because an anonymous 8042 is the exact defect this repository
+      # refuses to inherit.
+      - "${TR_DICOM_PORT:-5690}:4242"
+    healthcheck:
+      # This image ships neither curl nor wget (measured: `command -v wget` → not
+      # found), and /ping answers 404 even with a valid credential, so the usual
+      # one-liner leaves the container permanently unhealthy and nothing that
+      # depends_on it ever starts. python3 is in the image and /system answers 200.
+      test:
+        - CMD-SHELL
+        - python3 -c "import os,base64,urllib.request;r=urllib.request.Request('http://127.0.0.1:8042/system',headers={'Authorization':'Basic '+base64.b64encode(b'orthanc:'+os.environ['ORTHANC_PASSWORD'].encode()).decode()});raise SystemExit(0 if urllib.request.urlopen(r,timeout=5).status==200 else 1)"
+      interval: 20s
+      timeout: 5s
+      retries: 10
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [telrad]
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    image: telrad/api:${TR_RELEASE:-dev}
+    container_name: tr-api
+    <<: *runtime
+    profiles: ["nas", "cloud"]
+    environment:
+      TR_DB_URL: postgresql://${TR_DB_USER}:${TR_DB_PASSWORD}@tr-db:5432/${TR_DB_NAME}
+      TR_ORTHANC_URL: http://tr-orthanc:8042
+      TR_ORTHANC_USER: ${TR_ORTHANC_USER}
+      TR_ORTHANC_PASSWORD: ${TR_ORTHANC_PASSWORD}
+      TR_SESSION_SECRET: ${TR_SESSION_SECRET}
+      TR_UPLOAD_SIGNING_SECRET: ${TR_UPLOAD_SIGNING_SECRET}
+      TR_PUBLIC_URL: ${TR_PUBLIC_URL}
+      TR_LOG_LEVEL: ${TR_LOG_LEVEL:-info}
+      TZ: UTC
+    volumes:
+      # The api writes staged uploads here and the worker drains them into the
+      # image node, so both must see the same directory and nothing else does.
+      - ${TR_RUNTIME}/inbox:/app/inbox
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3001/health/live || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+    depends_on:
+      db:
+        condition: service_healthy
+      orthanc:
+        condition: service_healthy
+    networks: [telrad]
+
+  worker:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    image: telrad/worker:${TR_RELEASE:-dev}
+    container_name: tr-worker
+    <<: *runtime
+    profiles: ["nas", "cloud"]
+    command: ["run"]
+    volumes:
+      - ${TR_RUNTIME}/inbox:/app/inbox
+    environment:
+      TR_DB_URL: postgresql://${TR_DB_USER}:${TR_DB_PASSWORD}@tr-db:5432/${TR_DB_NAME}
+      TR_ORTHANC_URL: http://tr-orthanc:8042
+      TR_ORTHANC_USER: ${TR_ORTHANC_USER}
+      TR_ORTHANC_PASSWORD: ${TR_ORTHANC_PASSWORD}
+      TR_NODE_ID: node-nas-01
+      TR_INBOX_ROOT: /app/inbox
+      TR_INBOX_REMOVE_AFTER_PUSH: ${TR_INBOX_REMOVE_AFTER_PUSH:-true}
+      TR_WORKER_POLL_SECONDS: ${TR_WORKER_POLL_SECONDS:-10}
+      TR_LOG_LEVEL: ${TR_LOG_LEVEL:-info}
+      TZ: UTC
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [telrad]
+    # Single replica. Two workers would double-advance the ingest cursor on the
+    # NAS deployment, and nothing in the escalation path is idempotent yet.
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: tr-caddy
+    <<: *runtime
+    profiles: ["nas", "cloud"]
+    command:
+      - caddy
+      - run
+      - --config
+      - /etc/caddy/Caddyfile
+      - --adapter
+      - caddyfile
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${TR_RUNTIME}/caddy/data:/data
+      - ${TR_RUNTIME}/caddy/config:/config
+    ports:
+      # DSM owns 80/443, so the NAS target serves on 8443. The cloud target takes
+      # 443 and Caddy does the certificate work instead of the Synology wizard.
+      - "${TR_HTTPS_PORT:-8443}:8443"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [telrad]
+
+networks:
+  telrad:
+    name: telrad

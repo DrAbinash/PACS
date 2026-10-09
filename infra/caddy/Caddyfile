@@ -1,0 +1,49 @@
+{
+	admin off
+	auto_https off
+	servers {
+		trusted_proxies static private_ranges
+	}
+}
+
+# The NAS target cannot bind 443 because DSM and Web Station own it, so this
+# deployment serves on 8443 with Caddy's internal CA. The cloud target binds 443
+# and replaces `tls internal` with a real DNS challenge.
+:8443 {
+	tls internal
+
+	# Caddy is the only path to Orthanc's REST and DICOMweb surface. The viewer
+	# never holds a credential: the proxy attaches one on the way through, and no
+	# host port is published for 8042.
+	handle_path /dicom-web/* {
+		reverse_proxy tr-orthanc:8042 {
+			header_up Authorization "Basic {env.TR_ORTHANC_BASIC_B64}"
+		}
+	}
+
+	handle_path /api/* {
+		uri strip_prefix /api
+		reverse_proxy tr-api:3001
+	}
+
+	handle {
+		# Until the console exists, the root path is served by the api rather than
+		# by a placeholder page.
+		reverse_proxy tr-api:3001
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	log {
+		output file /data/access.log {
+			roll_size 20MiB
+			roll_keep 10
+		}
+		format json
+	}
+}

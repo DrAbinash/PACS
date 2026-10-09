@@ -1,0 +1,253 @@
+import { and, eq, gte, inArray, lte, or, sql } from 'drizzle-orm';
+import type { Db } from '@telrad/db';
+import {
+  ingestCursors, ingestEvents, orders, patients, slaClocks, studies, subSpecialties, tenantSites, uploadBatches,
+  uploadFiles,
+} from '@telrad/db';
+import { LIMITS, type Priority } from '@telrad/shared';
+import type { OrderCandidate, StorePort } from './ingest.js';
+import type { InboxStore } from './inbox.js';
+import { attributeByBatch, batchIdsFromLabels } from './labels.js';
+
+export function createStore(db: Db, nodeId: string): StorePort {
+  return {
+    async cursor() {
+      const [row] = await db.select().from(ingestCursors).where(eq(ingestCursors.storageNodeId, nodeId));
+      return { nodeId, since: row?.since === null || row?.since === undefined ? null : Number(row.since) };
+    },
+
+    async saveCursor(cursor, seen) {
+      await db.insert(ingestCursors)
+        .values({ storageNodeId: nodeId, since: String(cursor), instancesSeen: seen, lastRunAt: new Date(), lastError: null })
+        .onConflictDoUpdate({
+          target: ingestCursors.storageNodeId,
+          set: {
+            since: String(cursor),
+            instancesSeen: sql`${ingestCursors.instancesSeen} + ${seen}`,
+            lastRunAt: new Date(),
+            lastError: null,
+          },
+        });
+    },
+
+    async failCursor(message) {
+      await db.insert(ingestCursors)
+        .values({ storageNodeId: nodeId, since: null, lastError: message.slice(0, 500), lastErrorAt: new Date() })
+        .onConflictDoUpdate({
+          target: ingestCursors.storageNodeId,
+          set: { lastError: message.slice(0, 500), lastErrorAt: new Date() },
+        });
+    },
+
+    async resolveSite(prov) {
+      // The AE title that matters is the one Orthanc recorded as having SENT the
+      // study (metadata/RemoteAET), which is evidence about the network peer, not a
+      // string a modality can forge inside a data element.
+      // An uploaded file arrives with no DICOM-network provenance at all: the batch
+      // label written at push time is the only evidence of which center sent it, and
+      // it is stronger than any tag inside the file because the center did not write it.
+      const batchIds = batchIdsFromLabels(prov.labels);
+      if (batchIds.length > 0) {
+        const rows = await db.select({ tenantId: uploadBatches.tenantId, siteId: uploadBatches.siteId })
+          .from(uploadBatches).where(inArray(uploadBatches.id, batchIds));
+        const claimed = attributeByBatch(rows);
+        // Two tenants claiming one instance is a contradiction, and breaking the tie
+        // by label order would put a center's pixels in another center's queue.
+        if (claimed.kind === 'tenant') return { tenantId: claimed.tenantId, siteId: claimed.siteId };
+        if (claimed.kind === 'conflict') return null;
+      }
+
+      if (!prov.remoteAet) return null;
+      const rows = await db.select({ tenantId: tenantSites.tenantId, siteId: tenantSites.id })
+        .from(tenantSites)
+        .where(and(
+          sql`lower(${tenantSites.aeTitle}) = lower(${prov.remoteAet})`,
+          eq(tenantSites.status, 'active'),
+        ))
+        .limit(2);
+      // Two sites claiming one sending AE title is a configuration fault, not a tie
+      // to break: refuse, and let the operator count the resulting orphans.
+      if (rows.length !== 1) return null;
+      const hit = rows[0]!;
+      return { tenantId: hit.tenantId, siteId: hit.siteId };
+    },
+
+    async candidateOrders(tenantId, tags) {
+      // ordered_at is the only date an order carries at P0, so the candidate window
+      // is measured around it; a scheduled study date belongs to P1 order entry and
+      // this window should move to it rather than stay here.
+      const modality = tags.Modality ?? null;
+      const from = shiftDate(tags.StudyDate, -7);
+      const to = shiftDate(tags.StudyDate, 7);
+
+      const rows = await db.select({
+        orderId: orders.id,
+        accessionNumber: orders.accessionNumber,
+        patientId: patients.id,
+        patientName: patients.fullName,
+        patientMrn: patients.mrn,
+        dob: patients.dob,
+        orderedAt: orders.orderedAt,
+        modalityCode: orders.modalityCode,
+        siteId: orders.siteId,
+      }).from(orders)
+        .leftJoin(patients, eq(patients.id, orders.patientId))
+        .where(and(
+          eq(orders.tenantId, tenantId),
+          or(modality ? eq(orders.modalityCode, modality) : undefined, sql`${orders.modalityCode} is null`),
+          from ? gte(orders.orderedAt, from) : undefined,
+          to ? lte(orders.orderedAt, to) : undefined,
+        ))
+        .limit(50);
+
+      return rows.map((r) => ({
+        orderId: r.orderId,
+        // A candidate order with no patient record is still valid for the accession
+        // path, so this is a sentinel rather than a person id.
+        patientId: r.patientId ?? -1,
+        accessionNumber: r.accessionNumber,
+        patientName: r.patientName ?? null,
+        patientMrn: r.patientMrn ?? null,
+        dob: r.dob ? ymd(r.dob) : null,
+        studyDate: r.orderedAt ? ymd(r.orderedAt) : null,
+        modalityCode: r.modalityCode ?? null,
+        siteId: r.siteId,
+      })) satisfies OrderCandidate[];
+    },
+
+    async slaMinutesFor(code, priority) {
+      if (!code) return null;
+      const [row] = await db.select({ minutes: subSpecialties.defaultSlaMinutes })
+        .from(subSpecialties).where(eq(subSpecialties.code, code)).limit(1);
+      if (!row) return null;
+      // A STAT contract is a stated fraction of the routine window rather than a
+      // separate number per tenant, which is how two clocks drift apart.
+      if (priority === 'stat') return Math.max(Math.round(row.minutes * 0.1), 30);
+      if (priority === 'urgent') return Math.max(Math.round(row.minutes * 0.5), 60);
+      return row.minutes;
+    },
+
+    async write(draft) {
+      const rows = await db.insert(studies)
+        .values({
+          storageNodeId: draft.storageNodeId,
+          nodePk: draft.nodePk,
+          studyInstanceUid: draft.studyInstanceUid,
+          tenantId: draft.tenantId,
+          siteId: draft.siteId,
+          orderId: draft.orderId,
+          patientId: draft.patientId,
+          accessionNumber: draft.accessionNumber,
+          studyDate: draft.studyDate,
+          modalityCode: draft.modalityCode,
+          subSpecialtyCode: draft.subSpecialtyCode,
+          studyDescription: draft.studyDescription,
+          priority: draft.priority,
+          linkState: draft.linkState,
+          matchMethod: draft.matchMethod,
+          matchScore: draft.matchScore.toFixed(3),
+          receivedAt: draft.receivedAt,
+          classification: draft.classification,
+          qualityFlags: draft.qualityFlags,
+        })
+        .onConflictDoUpdate({
+          target: [studies.storageNodeId, studies.studyInstanceUid],
+          set: {
+            nodePk: sql`coalesce(excluded.node_pk, ${studies.nodePk})`,
+            tenantId: sql`coalesce(excluded.tenant_id, ${studies.tenantId})`,
+            siteId: sql`coalesce(excluded.site_id, ${studies.siteId})`,
+            orderId: sql`coalesce(excluded.order_id, ${studies.orderId})`,
+            patientId: sql`coalesce(excluded.patient_id, ${studies.patientId})`,
+            // A study already linked to an order does not get re-decided by a later
+            // instance of the same study; a human change is the only thing that may.
+            linkState: sql`case when ${studies.linkState} = 'linked' then ${studies.linkState} else excluded.link_state end`,
+            matchMethod: sql`case when ${studies.linkState} = 'linked' then ${studies.matchMethod} else excluded.match_method end`,
+            matchScore: sql`case when ${studies.linkState} = 'linked' then ${studies.matchScore} else excluded.match_score end`,
+            classification: draft.classification,
+            qualityFlags: draft.qualityFlags,
+            instanceCount: sql`coalesce(${studies.instanceCount}, 0) + 1`,
+            bytes: sql`coalesce(${studies.bytes}, 0) + ${draft.instanceBytes ?? 0}`,
+          },
+        })
+        .returning({
+          id: studies.id,
+          isNew: sql<boolean>`xmax = 0`,
+          // Not in the update set above, so on an update pass this reads the original
+          // first-sight time — which is what an SLA deadline has to be measured from.
+          receivedAt: studies.receivedAt,
+        });
+
+      const row = rows[0]!;
+      return { id: row.id, created: row.isNew === true, receivedAt: row.receivedAt };
+    },
+
+    async event(studyId, kind, detail) {
+      await db.insert(ingestEvents).values({ studyId, kind, detail });
+    },
+
+    async openSlaClock(studyId, tenantId, priority, deadlineAt) {
+      const inserted = await db.insert(slaClocks)
+        .values({ studyId, tenantId, priority: priority as Priority, deadlineAt })
+        .onConflictDoNothing()
+        .returning({ id: slaClocks.id });
+      return inserted.length > 0;
+    },
+  };
+}
+
+function ymd(d: Date): string {
+  return d.toISOString().slice(0, 10).replace(/-/g, '');
+}
+
+// Orthanc dates are DICOM "YYYYMMDD". A null or malformed value returns null so the
+// caller omits the filter entirely rather than matching nothing at all.
+function shiftDate(dicom: string | undefined, days: number): Date | null {
+  if (!dicom || dicom.length < 8) return null;
+  const base = Date.parse(`${dicom.slice(0, 4)}-${dicom.slice(4, 6)}-${dicom.slice(6, 8)}T00:00:00Z`);
+  if (Number.isNaN(base)) return null;
+  return new Date(base + days * 86_400_000);
+}
+
+export function createInboxStore(db: Db): InboxStore {
+  return {
+    // One batch at a time, claimed by moving it out of `sealed`. Without the claim
+    // two overlapping ticks could push the same file twice.
+    async claimBatch() {
+      const claimed = await db.execute<{ id: string; tenant_id: number | null }>(sql`
+        update telrad.upload_batches b
+           set status = 'processing', attempts = attempts + 1, last_error = null
+         where b.id = (
+           select id from telrad.upload_batches
+            where status = 'sealed'
+            order by created_at
+            for update skip locked
+            limit 1
+         )
+        returning id, tenant_id`);
+      const row = claimed[0];
+      if (!row) return null;
+
+      const files = await db.select({
+        id: uploadFiles.id,
+        filename: uploadFiles.filename,
+        storedPath: uploadFiles.storedPath,
+        kind: uploadFiles.kind,
+        status: uploadFiles.status,
+      }).from(uploadFiles).where(eq(uploadFiles.batchId, row.id)).orderBy(uploadFiles.filename).limit(LIMITS.batchFilesMax);
+
+      return { batchId: row.id, tenantId: row.tenant_id, files };
+    },
+
+    async markFile(id, status, orthancInstanceId, errorCode) {
+      await db.update(uploadFiles)
+        .set({ status, orthancInstanceId, errorCode, pushedAt: status === 'pushed' ? new Date() : undefined })
+        .where(eq(uploadFiles.id, id));
+    },
+
+    async finishBatch(batchId, status, error) {
+      await db.update(uploadBatches)
+        .set({ status, processedAt: new Date(), lastError: error })
+        .where(eq(uploadBatches.id, batchId));
+    },
+  };
+}

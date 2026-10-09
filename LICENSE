@@ -1,0 +1,14 @@
+Proprietary. All rights reserved.
+
+Copyright (c) 2026 the platform owner. No permission is granted to use, copy,
+modify, distribute, sublicense, or sell this software or any part of it, in
+source or compiled form, without the owner's prior written permission.
+
+Third-party components shipped or deployed alongside this software remain under
+their own licences, including Orthanc, PostgreSQL, OHIF/Cornerstone3D, Caddy and
+the Node packages named in each lockfile. Those licences are not changed by this
+notice, and none of them grants a right to use this repository's own code.
+
+Clinical note: this system stores patient images and reports. Nothing in it is a
+medical device, and no output of it is a clinical decision. A report only has
+effect when a registered clinician signs it.

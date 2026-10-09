@@ -1,0 +1,30 @@
+{
+  "name": "telrad",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "typecheck:test": "pnpm -r typecheck:test",
+    "test": "pnpm -r test",
+    "lint": "eslint .",
+    "db:generate": "pnpm --filter @telrad/db db:generate",
+    "db:migrate": "pnpm --filter @telrad/db db:migrate",
+    "bootstrap": "pnpm --filter @telrad/api cli bootstrap",
+    "verify-audit": "pnpm --filter @telrad/api cli verify-audit",
+    "ingest:once": "pnpm --filter @telrad/worker once",
+    "check": "pnpm typecheck && pnpm typecheck:test && pnpm test && bash scripts/doctor/check-config.sh"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "@types/node": "^22.10.2",
+    "eslint": "^9.17.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.0",
+    "vitest": "^2.1.8"
+  },
+  "packageManager": "pnpm@9.15.0",
+  "engines": { "node": ">=20.11" }
+}

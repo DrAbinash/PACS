@@ -1,0 +1,24 @@
+{
+  "Name": "telrad-node-01",
+  "CaseSensitive": true,
+  "AuthenticationEnabled": true,
+  "RegistrationEnabled": false,
+  "RemoteAccessAllowed": true,
+  "AllowDownloads": true,
+  "RestApiEnabled": true,
+  "DicomEnabled": true,
+  "DicomAet": "TELRAD",
+  "DicomIp": "0.0.0.0",
+  "DicomPort": 4242,
+  "HttpPort": 8042,
+  "OverwriteInstances": false,
+  "DicomWeb": {
+    "Enable": true,
+    "Name": "telrad-dicomweb",
+    "EnableFetch": true,
+    "EnableRetrieve": true,
+    "EnableStore": true,
+    "EnableFind": true,
+    "AccessControlAllowOrigin": []
+  }
+}
