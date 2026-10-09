@@ -205,6 +205,8 @@ export type ReportView = {
     decision: string | null;
     pdfSha256: string | null;
     openCriticals: number;
+    // One row per channel this version was released on, with what the queue thinks about it.
+    outbox: OutboxRow[];
   };
   // The critical loops on this study, in whatever state the server just computed them in.
   // The report panel and the desk board read the same object.
@@ -260,6 +262,28 @@ export type CriticalItem = {
 };
 
 export type CriticalCondition = { code: string; label: string; slaMinutes: number };
+
+// One queued notice. `sent` means a mail relay took the message — not that a human read it,
+// which is the distinction the whole notification design rests on.
+export type OutboxRow = {
+  id: number;
+  channel: 'portal' | 'email' | 'whatsapp' | 'hl7' | 'pdf_link';
+  recipient: string;
+  status: 'pending' | 'sent' | 'failed' | 'dead';
+  attemptNo: number;
+  nextAttemptAt: string | null;
+  sentAt: string | null;
+  errorCode: string | null;
+};
+
+export type NoticeItem = OutboxRow & {
+  reportId: number;
+  studyId: number;
+  version: number;
+  state: ReportState;
+  accession: string | null;
+  tenantCode: string | null;
+};
 
 export type MyReportItem = {
   reportId: number;
@@ -397,6 +421,13 @@ export const api = {
     call<{ critical: CriticalItem; openForStudy: number }>(`/v1/criticals/${id}/ack`, {
       method: 'POST', body: JSON.stringify({ acknowledgedByName, acknowledgedByRole }),
     }),
+  // What the queue still holds: notices that have not reached a relay. `dead` rows sit here
+  // until a person notices them, which is the point of the board rather than a bug in it.
+  notices: () => call<{
+    generatedAt: string;
+    counts: { queued: number; dead: number };
+    outbox: NoticeItem[];
+  }>('/v1/reports/outbox'),
   // Not a fetch: the browser takes the bytes and honours the Content-Disposition the route
   // sets, so the filename is decided by the server that knows the accession.
   pdfHref: (id: number) => `/v1/reports/${id}/pdf`,

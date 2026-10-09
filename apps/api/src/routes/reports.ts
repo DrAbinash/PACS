@@ -54,6 +54,7 @@ type ReportView = Report & {
   referringName: string | null;
   referringRegistration: string | null;
   referringPhone: string | null;
+  referringEmail: string | null;
   patientName: string | null;
   patientMrn: string | null;
   patientDob: Date | null;
@@ -99,6 +100,7 @@ export function reportsRouter(db: Db): Router {
       referringName: orders.referringName,
       referringRegistration: orders.referringRegistration,
       referringPhone: orders.referringPhone,
+      referringEmail: orders.referringEmail,
       patientName: patients.fullName,
       patientMrn: patients.mrn,
       patientDob: patients.dob,
@@ -127,6 +129,7 @@ export function reportsRouter(db: Db): Router {
       referringName: row.referringName,
       referringRegistration: row.referringRegistration,
       referringPhone: row.referringPhone,
+      referringEmail: row.referringEmail,
       patientName: row.patientName,
       patientMrn: row.patientMrn,
       patientDob: row.patientDob,
@@ -202,6 +205,7 @@ export function reportsRouter(db: Db): Router {
     me: { userId: number; role: string; grade: Grade | null } | null,
     authorGrade: Grade | null,
     criticals: DescribedCritical[],
+    outbox: Awaited<ReturnType<typeof outboxOf>>,
   ) {
     const mine = me !== null && row.authorUserId === me.userId;
     // Counted from the loops still open on this study, which is what the delivery rule asks
@@ -282,6 +286,10 @@ export function reportsRouter(db: Db): Router {
         decision: deliverable.ok ? null : deliverable.reason,
         pdfSha256: row.pdfSha256,
         openCriticals,
+        // One entry per queued channel. `sent` here means a relay took the message, not that a
+        // human read it, and the screen has to keep those apart — the same reason the critical
+        // loop exists at all.
+        outbox,
       },
       // The loops themselves, not only their count: a desk refused `critical_unacknowledged`
       // has to be able to see who the reader phoned and when the acknowledgement fell due, or
@@ -379,6 +387,26 @@ export function reportsRouter(db: Db): Router {
     };
   }
 
+  /**
+   * What the queue holds for this report version. Read out with the report because the desk's
+   * next question after "delivered" is always "so did the clinic hear", and a panel that cannot
+   * answer it sends somebody to the database.
+   */
+  async function outboxOf(reportId: number) {
+    return await db.select({
+      id: reportDeliveries.id,
+      channel: reportDeliveries.channel,
+      recipient: reportDeliveries.recipient,
+      status: reportDeliveries.status,
+      attemptNo: reportDeliveries.attemptNo,
+      nextAttemptAt: reportDeliveries.nextAttemptAt,
+      sentAt: reportDeliveries.sentAt,
+      errorCode: reportDeliveries.errorCode,
+    }).from(reportDeliveries)
+      .where(eq(reportDeliveries.reportId, reportId))
+      .orderBy(reportDeliveries.channel);
+  }
+
   async function respond(res: Response, p: Principal, reportId: number, status = 200) {
     const row = await loadReport(reportId);
     if (!row) return res.status(404).json({ ok: false, error: 'not_found' });
@@ -389,6 +417,7 @@ export function reportsRouter(db: Db): Router {
     const now = new Date();
     const criticals = (await criticalsForStudy(db, row.studyId))
       .map((c) => describeCritical(c, now, DESK_ROLES.includes(p.role)));
+    const outbox = await outboxOf(row.id);
     return res.status(status).json({
       ok: true,
       // The grade comes from the clinician profile and may legitimately be missing (a desk
@@ -396,7 +425,7 @@ export function reportsRouter(db: Db): Router {
       // the same lookup, and conflating them would grey out a button for the wrong reason.
       report: describeReport(row, await versionsOf(row.studyId),
         { userId: p.userId, role: p.role, grade: me?.grade ?? null },
-        author?.grade ?? null, criticals),
+        author?.grade ?? null, criticals, outbox),
     });
   }
 
@@ -598,6 +627,65 @@ export function reportsRouter(db: Db): Router {
     });
   }));
 
+  // Declared before '/reports/:id' with the other word-prefixed paths. The queue's own board:
+  // every notice that has not been delivered to the clinic yet, and the reason. `dead` is a
+  // state that means nothing unless somebody is shown it, and a report whose release was
+  // recorded while its notice quietly stopped being sent is the failure this screen exists to
+  // make loud.
+  r.get('/reports/outbox', ah(async (req: Ctx, res) => {
+    if (!requireRole(req.principal, DESK_ROLES, res)) return undefined;
+    const p = req.principal!;
+    const scope = scopeTenant(p);
+
+    const rows = await db.select({
+      id: reportDeliveries.id,
+      reportId: reportDeliveries.reportId,
+      studyId: reports.studyId,
+      channel: reportDeliveries.channel,
+      status: reportDeliveries.status,
+      recipient: reportDeliveries.recipient,
+      attemptNo: reportDeliveries.attemptNo,
+      nextAttemptAt: reportDeliveries.nextAttemptAt,
+      sentAt: reportDeliveries.sentAt,
+      errorCode: reportDeliveries.errorCode,
+      version: reports.version,
+      state: reports.state,
+      accession: studies.accessionNumber,
+      tenantCode: tenants.code,
+    }).from(reportDeliveries)
+      .innerJoin(reports, eq(reports.id, reportDeliveries.reportId))
+      .innerJoin(studies, eq(studies.id, reports.studyId))
+      .leftJoin(tenants, eq(tenants.id, reports.tenantId))
+      .where(and(
+        scope === null ? sql`true` : eq(reportDeliveries.tenantId, scope),
+        // Unsent work only. A clinic that has been told is not a row anybody needs to see.
+        inArray(reportDeliveries.status, ['pending', 'failed', 'dead']),
+      ))
+      .orderBy(reportDeliveries.nextAttemptAt);
+
+    await appendAudit(db, {
+      actorUserId: p.userId, actorKind: 'human', tenantId: p.tenantId,
+      action: 'report.outbox_board', entity: 'report_deliveries',
+      detail: {
+        count: rows.length,
+        dead: rows.filter((row) => row.status === 'dead').length,
+        scope: scope === null ? 'platform' : 'tenant',
+      },
+    });
+    res.json({
+      ok: true,
+      generatedAt: new Date(),
+      counts: {
+        queued: rows.filter((row) => row.status !== 'dead').length,
+        dead: rows.filter((row) => row.status === 'dead').length,
+      },
+      // Whether this deployment can send at all is the worker's business, not this route's: a
+      // row that has never been attempted carries `attemptNo: 0` and no error code, which is the
+      // honest signal that nothing has tried yet, and the worker's boot line names the relay.
+      outbox: rows,
+    });
+  }));
+
   r.get('/reports/:id', ah(async (req: Ctx, res) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ ok: false, error: 'bad_id' });
@@ -669,6 +757,24 @@ export function reportsRouter(db: Db): Router {
       idempotencyKey: deliveryIdempotencyKey({ reportId: id, version: row.version, channel: 'portal' }),
     }).onConflictDoNothing({ target: reportDeliveries.idempotencyKey });
 
+    // The email is *queued*, never sent from this request. A desk pressing Deliver must get its
+    // answer in the time it takes to click, and a mail relay that takes nine seconds — or is
+    // down, or greylisting — cannot be allowed to become a report that failed to be released.
+    // The row is the promise; the worker keeps it.
+    const emailQueued = row.referringEmail !== null;
+    if (row.referringEmail !== null) {
+      await db.insert(reportDeliveries).values({
+        reportId: id,
+        tenantId: row.tenantId,
+        channel: 'email',
+        recipient: row.referringEmail,
+        status: 'pending',
+        attemptNo: 0,
+        nextAttemptAt: now,
+        idempotencyKey: deliveryIdempotencyKey({ reportId: id, version: row.version, channel: 'email' }),
+      }).onConflictDoNothing({ target: reportDeliveries.idempotencyKey });
+    }
+
     await appendAudit(db, {
       actorUserId: p.userId, actorKind: 'human', tenantId: row.tenantId,
       action: 'report.delivered', entity: 'reports', entityId: String(id),
@@ -683,6 +789,12 @@ export function reportsRouter(db: Db): Router {
         pdfBytes: rendered.bytes.length,
         pdfPages: rendered.pages,
         requiredSecondName: row.requiresReviewer,
+        // Whether the clinic is about to be told, and to what address. Recorded at the moment of
+        // release rather than derived later, because the referral can be edited afterwards and
+        // the question "did you email Dr Rao" is about this instant.
+        notification: emailQueued
+          ? { channel: 'email', recipient: row.referringEmail, status: 'pending' }
+          : { channel: 'email', recipient: null, status: 'no_referring_email' },
         // Every loop that was open or closed at the moment the document left, with the name
         // that closed it. This is the row an investigator reads to establish that a critical
         // finding was acknowledged *before* the report went out rather than after.

@@ -9,6 +9,7 @@
     "once": "tsx src/main.ts once",
     "dispatch-once": "tsx src/main.ts dispatch-once",
     "criticals-once": "tsx src/main.ts criticals-once",
+    "notify-once": "tsx src/main.ts notify-once",
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -18,10 +19,12 @@
     "@telrad/db": "workspace:*",
     "@telrad/shared": "workspace:*",
     "drizzle-orm": "^0.38.3",
-    "fflate": "^0.8.2"
+    "fflate": "^0.8.2",
+    "nodemailer": "^10.0.16"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "@types/nodemailer": "^8.0.2",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"

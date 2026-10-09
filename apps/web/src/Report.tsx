@@ -234,6 +234,16 @@ export default function ReportPanel({ studyId, onChanged }: { studyId: number; o
           {view.delivery.pdfSha256 && (
             <span className="sub">delivered PDF sha256 {view.delivery.pdfSha256.slice(0, 12)}…</span>
           )}
+          {/* The difference between "released" and "the clinic knows". A queued notice is not a
+              sent one, and a dead one is a finding rather than a detail. */}
+          {view.delivery.outbox.filter((o) => o.channel === 'email').map((o) => (
+            <span key={o.id} className={`state ${o.status === 'dead' ? 'red' : o.status === 'sent' ? 'green' : 'amber'}`}>
+              {o.status === 'sent' ? `notice sent to ${o.recipient}`
+                : o.status === 'dead' ? `notice DEAD — ${o.recipient} (${o.errorCode ?? 'no reason given'})`
+                : `notice ${o.status} to ${o.recipient} · attempt ${o.attemptNo}, `
+                  + retryLabel(o.nextAttemptAt)}
+            </span>
+          ))}
         </div>
       )}
 
@@ -318,6 +328,19 @@ export function explainCode(code: string): string {
     case 'no_report': return 'No report on this case yet.';
     default: return code;
   }
+}
+
+/**
+ * When a notice will be tried again. A timestamp alone makes the reader do the subtraction that
+ * decides whether anything is wrong: `next 2:59:01 AM` on a screen reading 3:40 is the queue not
+ * being run, and it has to say so.
+ */
+export function retryLabel(nextAttemptAt: string | null): string {
+  if (nextAttemptAt === null) return 'no retry scheduled';
+  const when = new Date(nextAttemptAt);
+  const stamp = when.toDateString() === new Date().toDateString()
+    ? when.toLocaleTimeString() : when.toLocaleString();
+  return when.getTime() <= Date.now() ? `overdue since ${stamp}` : `retry ${stamp}`;
 }
 
 export function explain(err: unknown): string {

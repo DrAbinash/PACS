@@ -71,6 +71,9 @@ python "$ROOT/scripts/validation/run-report-flow.py" --phase check
 say "phase critical"
 python "$ROOT/scripts/validation/run-report-flow.py" --phase critical
 
+say "phase notify"
+python "$ROOT/scripts/validation/run-report-flow.py" --phase notify
+
 say "phase late-clock-after-sign"
 python "$ROOT/scripts/validation/run-report-flow.py" --phase late-clock-after-sign
 

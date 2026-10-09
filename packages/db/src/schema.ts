@@ -256,6 +256,10 @@ export const orders = telrad.table('orders', {
   referringName: text('referring_name'),
   referringPhone: text('referring_phone'),
   referringRegistration: text('referring_registration'),
+  // The address a "your report is ready" message can be sent to. Nullable, and nullable on
+  // purpose: a center that faxes or collects on the doorstep has one, and inventing an address
+  // to satisfy a column is how a notice ends up in somebody else's inbox.
+  referringEmail: text('referring_email'),
   studyDescription: text('study_description'),
   // Scheduled date is what the ingest candidate window should really use. Until
   // order entry collects it, apps/worker/store.ts falls back to ordered_at and says

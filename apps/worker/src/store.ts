@@ -2,11 +2,12 @@ import { and, asc, eq, gte, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import type { Db } from '@telrad/db';
 import {
   appendAudit, assignments, criticalEvents, dispatchableStudies, escalationRules, ingestCursors, ingestEvents, offerHistory, orders,
-  panelReaders, patients, slaClocks, studies, subSpecialties, tenantSites, uploadBatches, uploadFiles,
+  panelReaders, patients, reports, reportDeliveries, slaClocks, studies, subSpecialties, tenants, tenantSites, uploadBatches, uploadFiles,
 } from '@telrad/db';
 import { LIMITS, type EscalationRule, type Priority } from '@telrad/shared';
 import type { EscalatableClock, EscalationPort } from './escalate.js';
 import type { CriticalPort } from './criticals.js';
+import type { NotifyPort, QueuedNotification } from './notify.js';
 import type { DispatchPort } from './dispatch.js';
 import type { OrderCandidate, StorePort } from './ingest.js';
 import type { InboxStore } from './inbox.js';
@@ -444,5 +445,72 @@ export function createCriticalStore(db: Db): CriticalPort {
     },
 
     async record(input) { await appendAudit(db, input); },
+  };
+}
+
+export function createNotifyStore(db: Db): NotifyPort {
+  return {
+    async due(now, limit) {
+      // The queue is joined here rather than assembled in the sweep, because the message needs
+      // the centre's name and the version the clinic is being told about, and a sweep that read
+      // one row per message would be a sweep that slows down as the backlog grows.
+      const rows = await db.select({
+        id: reportDeliveries.id,
+        reportId: reportDeliveries.reportId,
+        tenantId: reportDeliveries.tenantId,
+        recipient: reportDeliveries.recipient,
+        status: reportDeliveries.status,
+        attemptNo: reportDeliveries.attemptNo,
+        nextAttemptAt: reportDeliveries.nextAttemptAt,
+        accession: studies.accessionNumber,
+        version: reports.version,
+        signedAt: reports.signedAt,
+        centreName: tenants.legalName,
+        tenantCode: tenants.code,
+        // The second name on the row, not the sub-specialty's rule. The message the clinic reads
+        // says how many signatures the document carries, and a case released with the rule
+        // switched off carries one whatever the catalogue demands.
+        hasSecondSignature: reports.reviewerUserId,
+        patientName: patients.fullName,
+        patientMrn: patients.mrn,
+      }).from(reportDeliveries)
+        .innerJoin(reports, eq(reports.id, reportDeliveries.reportId))
+        .innerJoin(studies, eq(studies.id, reports.studyId))
+        .leftJoin(tenants, eq(tenants.id, reports.tenantId))
+        .leftJoin(patients, eq(patients.id, studies.patientId))
+        .where(and(
+          eq(reportDeliveries.channel, 'email'),
+          inArray(reportDeliveries.status, ['pending', 'failed']),
+          or(isNull(reportDeliveries.nextAttemptAt), lte(reportDeliveries.nextAttemptAt, now)),
+        ))
+        // Oldest scheduled first: a backlog should drain in the order it was created, and a
+        // message that has been waiting since 02:00 should not lose to one queued at 03:59.
+        .orderBy(reportDeliveries.nextAttemptAt)
+        .limit(limit);
+
+      return rows.map((row) => ({
+        ...row,
+        accession: row.accession ?? null,
+        centreName: row.centreName ?? null,
+        tenantCode: row.tenantCode ?? null,
+        hasSecondSignature: row.hasSecondSignature !== null,
+        patientName: row.patientName ?? null,
+        patientMrn: row.patientMrn ?? null,
+      })) satisfies QueuedNotification[];
+    },
+
+    async record(id, outcome, sentAt) {
+      await db.update(reportDeliveries)
+        .set({
+          status: outcome.status,
+          attemptNo: outcome.attemptNo,
+          nextAttemptAt: outcome.nextAttemptAt,
+          errorCode: outcome.errorCode,
+          ...(sentAt === null ? {} : { sentAt }),
+        })
+        .where(eq(reportDeliveries.id, id));
+    },
+
+    async audit(input) { await appendAudit(db, input); },
   };
 }

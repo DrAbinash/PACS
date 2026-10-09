@@ -38,6 +38,12 @@ you swap in before booting it on the NAS:
 docker manifest inspect orthancteam/orthanc@${ORTHANC_IMAGE_DIGEST} >/dev/null && echo pullable
 ```
 
+Leave `TR_SMTP_URL` and `TR_SMTP_FROM` empty until there is a relay to point at: the queue then
+accumulates and `notify-once` reports `skipped` rather than destroying the record of which clinics
+were never told. When you do fill them, fill all three together — `TR_SMTP_URL` without
+`TR_PUBLIC_URL` produces a notice whose only actionable line is a link nobody can follow, and the
+sweep refuses it rather than sending it.
+
 ```bash
 bash scripts/doctor/check-secrets.sh   # must pass before the first boot
 bash scripts/doctor/check-config.sh
@@ -375,14 +381,30 @@ with two reader accounts:
   row gets `breached = true` and one `critical.breached` audit row. A finding acknowledged *late*
   is stamped too — if only open loops were swept, the breach would depend on when a process
   happened to wake up.
+- **a released report tells the clinic, and the telling is not the release.** With `TR_SMTP_URL`,
+  `TR_SMTP_FROM` and `TR_PUBLIC_URL` set, `POST /v1/reports/:id/deliver` inserts a
+  `channel='email', status='pending'` row and returns; `pnpm --filter @telrad/worker notify-once`
+  drains it. Four things to check, because these are the four a mail feature usually misses. Read
+  the message **in the sink**, not from our status column: it must contain no patient name, no MRN
+  and no report text — a body that fails that guard is marked `dead` with
+  `patient_identifier_in_body` and is never retried, because a leak retried five times is five
+  leaks. Point `TR_SMTP_URL` at a port nothing listens on: the row must come back `failed` with
+  `attempt_no = 1` and a `next_attempt_at` in the future, not hammered again, and the fifth attempt
+  must end it as `dead` — listed by `GET /v1/reports/outbox`, because a queue that quietly stops
+  trying is worse than no queue at all. Unset `TR_SMTP_URL` entirely: the sweep must write *nothing*
+  and report `skipped`, so a box with no relay keeps its backlog rather than destroying the record
+  of which clinics were never told. And check the sentence about signatures against the row: it
+  comes from `reports.reviewer_user_id`, not from the sub-specialty's rule — the live run caught the
+  first version reading the rule, and it told a clinic that a report with one name under it had two.
 
-What is not built here yet: **the message.** A report does leave the system now — the desk
-releases it, the PDF is rendered and its SHA-256 recorded, and a critical finding cannot be
-answered-for by a click a reader makes — but nothing is *sent*. There is no email, no PDF to a
-clinic that has no login, and no telephone call placed by the product: `critical_events` records
-the call a reader says they made and the answer a desk says it received, and the referring
-clinic's own notification of "your report is ready" still does not exist. Not built either:
-billing, payouts, and any pager or SMS.
+What is not built here yet: **a message that carries the document.** The notice is a pointer —
+accession, version, signature time, portal link — never the PDF and never the findings, because an
+email body is copied, backed up and indexed by everything between a relay and a court. There is no
+WhatsApp or SMS channel: a WhatsApp Business account needs Meta verification and pre-approved
+templates, and it would move the fact of a patient's study into a third party's store outside the
+DPDP envelope. No telephone call is placed by the product — `critical_events` records the call a
+reader says they made and the answer a desk says it received — and nothing beyond "a relay accepted
+this" is known about the clinic's side. Not built either: billing, payouts, and any pager.
 
 Do **not** point OHIF at this deployment yet. `infra/orthanc/orthanc.json` contains a
 `DicomWeb` block with `Enable: true`, but `curl -s -u …/dicom-web/` answers 404 on the pinned
@@ -438,11 +460,18 @@ condition from a closed list and naming who they telephoned, the report held und
 somebody at the referring end is recorded as having answered, and the worker stamping a breach
 on a call nobody answered while a call answered late keeps its breach too.
 
-Not built: **the message**. Nothing is sent to anybody. The delivery row is written and no email,
-WhatsApp or HL7 goes out with it, so a referring clinic without a login still hears nothing —
-which is also why "notify the center" stays open. The critical loop records a telephone call, it
-does not place one, and an acknowledgement is a name typed by a desk rather than an identity
-proved. Not built either: billing and payouts, and any pager or SMS — `alert_ops` and
+Not built: **a message that carries the document.** The notice that *is* built goes like this: a
+release queues an email to the address recorded on the referral, a worker sends it on a backoff
+ladder, a body that carries a patient identifier is killed rather than sent, and a relay that never
+accepts ends in a `dead` row somebody is shown. It is **proven against a local sink (Mailpit) and
+never against a real provider**, so whether a government hospital's domain accepts it, or a
+greylist delays it by an hour, is unmeasured — and the message is a pointer, never the PDF and
+never the findings, so a referring clinic without a login still cannot read the report from the
+email alone. The critical loop records a telephone call, it does not place one, and an
+acknowledgement is a name typed by a desk rather than an identity proved. Not built either:
+WhatsApp, SMS or HL7 — a WhatsApp Business account needs Meta verification and pre-approved
+templates, and it would move the fact of a patient's study into a third party's store outside the
+DPDP envelope. Not built either: billing and payouts, and any pager — `alert_ops` and
 `notify_center` are recorded, not sent. Not a **diagnostic** viewer either: what exists
 has no hanging protocols, no MPR, no measurement or annotation tools, no cine, and shows one
 series at a time; it is enough to look at a study and not enough to sign one in a reading

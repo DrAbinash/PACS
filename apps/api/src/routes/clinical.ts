@@ -6,7 +6,7 @@ import {
   patients,
   tenantSites,
 } from '@telrad/db';
-import { cleanText, normaliseMrn, validateOrderInput, validatePatientInput } from '@telrad/shared';
+import { cleanText, normaliseEmail, normaliseMrn, validateOrderInput, validatePatientInput } from '@telrad/shared';
 import { Router } from 'express';
 import { requireAuth, scoped, scopeTenant, type Ctx } from '../auth.js';
 import { ah } from '../handler.js';
@@ -117,6 +117,11 @@ export function clinicalRouter(db: Db): Router {
       referringName: cleanText(req.body.referringName ?? '', 160) || null,
       referringPhone: cleanText(req.body.referringPhone ?? '', 20) || null,
       referringRegistration: cleanText(req.body.referringRegistration ?? '', 40) || null,
+      // Normalised rather than validated-and-rejected: a referral arriving without a usable
+      // address is ordinary, and the notification queue is allowed to be empty. What is not
+      // allowed is a half-typed string reaching a mail server, so anything that is not clearly
+      // an address is stored as nothing.
+      referringEmail: normaliseEmail(req.body.referringEmail),
       studyDescription: cleanText(req.body.studyDescription ?? '', 160) || null,
       scheduledDate: sched.length === 8 ? new Date(`${sched.slice(0, 4)}-${sched.slice(4, 6)}-${sched.slice(6, 8)}T00:00:00Z`) : null,
       source: 'portal',
@@ -150,6 +155,10 @@ export function clinicalRouter(db: Db): Router {
       patch.status = s;
     }
     if (req.body?.clinicalIndication !== undefined) patch.clinicalIndication = cleanText(req.body.clinicalIndication, 2000);
+    // The address a report-ready notice goes to. Replaced only when the caller sends the key,
+    // and set to nothing rather than rejected when what arrived is not an address: a referral
+    // record is not going to be unsaveable because of a notification field.
+    if (req.body?.referringEmail !== undefined) patch.referringEmail = normaliseEmail(req.body.referringEmail);
 
     if (Object.keys(patch).length === 0) return res.status(422).json({ ok: false, error: 'nothing_to_change' });
 

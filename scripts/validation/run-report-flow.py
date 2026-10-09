@@ -21,7 +21,23 @@ Phases, with the worker run by the operator between them:
   ... pnpm --filter @telrad/worker dispatch-once
   python scripts/validation/run-report-flow.py --phase accept
   python scripts/validation/run-report-flow.py --phase check
+  python scripts/validation/run-report-flow.py --phase critical
+  python scripts/validation/run-report-flow.py --phase notify
   python scripts/validation/run-report-flow.py --phase late-clock-after-sign
+
+`bash scripts/validation/run-report-live.sh` runs all of them in order against a stack it
+builds itself, which is the only version of this anyone will reproduce.
+
+`--phase critical` needs the study already delivered-or-signed and asserts the closed loop:
+a finding declared by its reader blocks the release until a named clinician is recorded as
+having answered it, and a finding nobody answers is stamped late by the worker rather than
+by somebody's wall clock.
+
+`--phase notify` drains the outbox into a real mail sink (Mailpit on 127.0.0.1:1025) and
+reads the message back from the sink's own API — the queue's `sent` flag is a claim about a
+relay, and the only proof about the clinic is the message sitting there. It asserts the body
+carries no patient identifier, and it walks a relay that never accepts a message all the way
+to `dead`.
 
 The last phase moves an already-signed clock's deadline to a point after the signature but
 before now, and runs the sweep over it. Nothing may fire and no breach may be stamped: `dueStages` returns nothing
@@ -109,7 +125,7 @@ def phase_prepare():
         "tenantId": 1, "accessionNumber": ACC, "patientId": patient_id,
         "modalityCode": MODALITY, "subSpecialtyCode": SPECIALTY, "priority": PRIORITY,
         "scheduledDate": today, "clinicalIndication": "report flow — sudden headache",
-        "referringName": "Dr Referrer",
+        "referringName": "Dr Referrer", "referringEmail": "dr.rao@govhosp.test",
     })
     flow.check("order", status in (200, 201), json.dumps(body)[:120])
 
@@ -344,9 +360,15 @@ def phase_check():
 
     delivery_row = psql("select d.channel || '|' || d.status || '|' || d.idempotency_key || '|' || d.recipient "
                         "from telrad.report_deliveries d "
-                        f"join telrad.reports r on r.id = d.report_id where r.id = {report_id};")
-    flow.check("one sent delivery row, keyed to this report version",
-               delivery_row.strip() == f"portal|sent|report:{report_id}:v1:portal|Dr Referrer", delivery_row)
+                        f"join telrad.reports r on r.id = d.report_id where r.id = {report_id} order by d.channel;")
+    # Two rows, not one: the portal line is the record of the desk's act and the email line is
+    # a notice the worker has not tried yet. A release that queued nothing because the referral
+    # had no address would show up here as one row, which is why both are named.
+    flow.check("one sent portal row and one queued notice, each keyed to this report version",
+               delivery_row.replace("\n", "|")
+               == f"email|pending|report:{report_id}:v1:email|dr.rao@govhosp.test"
+                  f"|portal|sent|report:{report_id}:v1:portal|Dr Referrer",
+               delivery_row.replace("\n", " | "))
 
     # ---- amendment ------------------------------------------------------------------
     status, body = second.call("POST", f"/v1/reports/{report_id}/amend", {})
@@ -525,6 +547,198 @@ def phase_late_clock_after_sign():
     flow.check("and no live assignment for it survives the sweep",
                live.stdout.strip() == "0", f"live_assignments={live.stdout.strip()[:20]}")
     print(f"worker: {(ran.stdout or '').strip()[-300:]}")
+
+
+MAIL_API = "http://127.0.0.1:8025"
+
+
+def mail(path=""):
+    """Read the sink, not our own logs. The queue saying `sent` is a claim about a relay; the
+    message sitting in Mailpit is the claim about the clinic."""
+    raw = urllib.request.urlopen(MAIL_API + "/api/v1" + path, timeout=15).read()
+    return json.loads(raw)
+
+
+def mail_body(message_id):
+    """`/api/v1/message/<id>` (singular) is the full message and its `Text` is already decoded on
+    this build; the plural list endpoint only carries envelopes, and the `…/text` part routes I
+    first reached for answer 404. Measured against the running sink, not against the docs."""
+    msg = urllib.request.urlopen(f"{MAIL_API}/api/v1/message/{message_id}", timeout=15).read()
+    return json.loads(msg).get("Text", "")
+
+
+def worker(env_extra, arg):
+    env = dict()
+    for line in (Path(".runtime/live-stack/env.sh").read_text(encoding="utf-8").splitlines()):
+        if line.startswith("export "):
+            k, _, v = line[len("export "):].partition("=")
+            env[k] = v.strip('"')
+    env.update(env_extra)
+    import os
+    merged = {**os.environ, **env}
+    return subprocess.run(f"pnpm --filter @telrad/worker {arg}", shell=True,
+                          capture_output=True, text=True, env=merged)
+
+
+def phase_notify():
+    """What the clinic was actually told, and what happens when the relay is not there.
+
+    A report can be released correctly — signed, cleared, hashed, audited — and the referring
+    clinician can still not know it exists. This phase drives the queue that closes that gap,
+    reads the message back out of a real mail sink rather than trusting our own status column,
+    and proves the two halves that a notification feature is usually missing: that nothing about
+    the patient leaves in the subject or body, and that a relay which never accepts the message
+    ends in a state somebody can see instead of a row nobody looks at again.
+    """
+    ops, green = flow.owner(), flow.login(GREEN)
+    study_id = int(psql(f"select id from telrad.studies where accession_number = '{ACC}';"))
+    v1 = int(psql(f"select id from telrad.reports where study_id = {study_id} and version = 1;"))
+    v2 = int(psql(f"select id from telrad.reports where study_id = {study_id} and version = 2;"))
+
+    rows = psql("select report_id || '=' || status || '=' || attempt_no from telrad.report_deliveries "
+                "where channel = 'email' order by report_id;")
+    flow.check("both released versions queued a notice and neither has been attempted",
+               rows.strip() == f"{v1}=pending=0\n{v2}=pending=0" or rows.replace("\n", "|") == f"{v1}=pending=0|{v2}=pending=0",
+               rows.replace("\n", " | ")[:200])
+
+    status, body = ops.call("GET", "/v1/reports/outbox")
+    queued = body.get("outbox", [])
+    flow.check("the notice board lists both, oldest first",
+               status == 200 and body.get("counts", {}).get("queued") == 2
+               and [q["reportId"] for q in queued] == [v1, v2],
+               f"{status} {json.dumps(body)[:200]}")
+    flow.check("and a reader has no notice board", green.call("GET", "/v1/reports/outbox")[0] == 403,
+               str(green.call("GET", "/v1/reports/outbox")[0]))
+
+    flow.check("nothing has reached the sink yet", mail("/messages")["total"] == 0,
+               str(mail("/messages")["total"]))
+
+    ran = worker({}, "notify-once")
+    flow.check("the drain ran and said it sent two",
+               ran.returncode == 0 and "notify checked=2 sent=2" in (ran.stdout or ""),
+               (ran.stderr or ran.stdout)[-220:])
+
+    listed = mail("/messages")
+    flow.check("the sink holds two messages", listed["total"] == 2, json.dumps(listed)[:160])
+    subjects = sorted(m["Subject"] for m in listed["messages"])
+    flow.check("one per released version",
+               subjects == [f"Report ready — {ACC} (version 1)", f"Report ready — {ACC} (version 2)"],
+               json.dumps(subjects)[:200])
+
+    # Mailpit lists newest first and this run has two messages in it, so the bodies are keyed by
+    # the version in their subject rather than by position: an assertion about "the message" that
+    # quietly reads the wrong version proves nothing about the one it names.
+    by_version = {int(m["Subject"].rsplit("version ", 1)[1].rstrip(")")): m
+                  for m in listed["messages"] if "version " in m["Subject"]}
+
+    to = by_version[1]["To"]
+    flow.check("it went to the address on the referral, not to a name",
+               any("dr.rao@govhosp.test" in (r.get("Address", "") if isinstance(r, dict) else str(r)) for r in to),
+               json.dumps(to)[:160])
+
+    # The words a report of this study would contain and a notification must not. Short words are
+    # dropped because "No" is the first token of the findings and also an English word: a guard
+    # that matches "no" fails on the sentence promising not to leak anything.
+    clinical = [w.strip(".,;").lower() for w in FINDINGS.split() if len(w.strip(".,;")) >= 6]
+
+    report_of_version = {1: v1, 2: v2}
+    for v in (1, 2):
+        message = by_version[v]
+        text = mail_body(message["ID"])
+        flow.check(f"the v{v} message carries the portal link and names its own version",
+                   "http://127.0.0.1:3101/portal" in text and f"Version {v}," in text,
+                   text[:200].replace("\n", " | "))
+        leaked = [w for w in clinical if w in text.lower()]
+        flow.check(f"and no patient identifier or clinical word anywhere in the v{v} message",
+                   NAME.lower() not in text.lower() and MRN.lower() not in text.lower()
+                   and "1968" not in text and not leaked,
+                   f"leaked={leaked} {text[:120]}".replace("\n", " | "))
+        # The sentence about signatures is the one that can be wrong without anybody noticing, so
+        # it is read against the document rather than against the rule that asked for them.
+        # `::text` on a boolean prints `true`, not the `t` of the bare output format — measured,
+        # because the first version of this comparison asked for `t`, always read False, and
+        # "passed" for the one-signature version by accident while failing the two-signature one.
+        has_second = psql(f"select (reviewer_user_id is not null)::text from telrad.reports "
+                          f"where id = {report_of_version[v]};").strip() == "true"
+        want = "carries two signatures" if has_second else "carries one signature"
+        flow.check(f"and the v{v} message says the signatures the document actually carries",
+                   want in text,
+                   f"reviewer_present={has_second} want={want!r} "
+                   + " | ".join(l for l in text.splitlines() if "signature" in l))
+
+    status, body = ops.call("GET", "/v1/reports/outbox")
+    flow.check("the board is empty once the clinic has been told",
+               body.get("counts", {}).get("queued") == 0 and body.get("outbox") == [],
+               json.dumps(body)[:160])
+
+    status, one = ops.call("GET", f"/v1/reports/{v2}")
+    email_rows = [o for o in one.get("report", {}).get("delivery", {}).get("outbox", [])
+                  if o["channel"] == "email"]
+    flow.check("the report itself says the notice was sent, and to whom",
+               status == 200 and len(email_rows) == 1 and email_rows[0]["status"] == "sent"
+               and bool(email_rows[0]["sentAt"]),
+               json.dumps(email_rows)[:200])
+
+    sent = psql("select count(*) from telrad.audit_log where action = 'notify.sent' "
+                "and detail->>'transport' = '127.0.0.1';")
+    flow.check("the audit chain records each send with the relay it went through", sent.strip() == "2", sent)
+
+    # ---- the part that is usually missing: a relay that is not there ------------------
+    dead_relay = {"TR_SMTP_URL": "smtp://127.0.0.1:1026"}
+    psql(f"update telrad.report_deliveries set status='pending', attempt_no=0, sent_at=null, "
+         f"error_code=null, next_attempt_at=now() where report_id = {v1} and channel='email';")
+    ran = worker(dead_relay, "notify-once")
+    flow.check("a refused connection is reported, not swallowed",
+               ran.returncode == 0 and "notify checked=1 sent=0 retried=1" in (ran.stdout or ""),
+               (ran.stderr or ran.stdout)[-220:])
+    after = psql("select status || '=' || attempt_no from telrad.report_deliveries "
+                 f"where report_id = {v1} and channel = 'email';")
+    flow.check("the row is failed, on its first attempt", after.strip() == "failed=1", after)
+    due = psql("select (next_attempt_at > now())::text from telrad.report_deliveries "
+               f"where report_id = {v1} and channel = 'email';")
+    flow.check("and scheduled for later rather than hammered again immediately", due.strip() == "true", due)
+
+    # Walk the rest of the ladder in one go: the last attempt has to end the row's life as
+    # something other than a retry, or the queue never stops and nobody is ever told.
+    psql(f"update telrad.report_deliveries set status='failed', attempt_no=4, "
+         f"next_attempt_at=now() where report_id = {v1} and channel='email';")
+    ran = worker(dead_relay, "notify-once")
+    flow.check("the fifth attempt is the one that gives up",
+               "notify checked=1 sent=0 retried=0 dead=1" in (ran.stdout or ""),
+               (ran.stderr or ran.stdout)[-220:])
+    ended = psql("select status || '=' || coalesce(next_attempt_at::text,'null') || '=' "
+                 "|| coalesce(error_code,'null') from telrad.report_deliveries "
+                 f"where report_id = {v1} and channel = 'email';")
+    flow.check("dead, with no further attempt scheduled",
+               ended.startswith("dead=null="), ended[:120])
+
+    status, body = ops.call("GET", "/v1/reports/outbox")
+    flow.check("and it is on the board, because a queue that gives up quietly is worse than none",
+               body.get("counts", {}).get("dead") == 1
+               and body.get("outbox", []) and body["outbox"][0]["status"] == "dead",
+               json.dumps(body)[:200])
+    given_up = psql("select count(*) from telrad.audit_log where action = 'notify.dead' "
+                    f"and detail->>'reportId' = '{v1}';")
+    flow.check("the giving-up is its own audit action", given_up.strip() == "1", given_up)
+
+    before = mail("/messages")["total"]
+    ran = worker(dead_relay, "notify-once")
+    flow.check("and a dead row is never tried again",
+               "notify checked=" not in (ran.stdout or "") and mail("/messages")["total"] == before,
+               (ran.stdout or "")[-160:])
+
+    # ---- the address itself ----------------------------------------------------------
+    order_id = int(psql(f"select order_id from telrad.studies where id = {study_id};"))
+    status, _ = ops.call("PATCH", f"/v1/orders/{order_id}", {"referringEmail": "dr@@govhosp.test"})
+    stored = psql(f"select coalesce(referring_email,'null') from telrad.orders where id = {order_id};")
+    flow.check("a string that is not an address is stored as nothing, not as a wrong address",
+               status in (200, 422) and stored == "null", f"{status} {stored}")
+    status, _ = ops.call("PATCH", f"/v1/orders/{order_id}", {"referringEmail": "  Dr.Rao@GovHosp.Test "})
+    stored = psql(f"select referring_email from telrad.orders where id = {order_id};")
+    flow.check("and a real one is normalised rather than refused", stored == "dr.rao@govhosp.test",
+               stored)
+    psql(f"delete from telrad.report_deliveries where report_id = {v1} and channel='email';")
+    print(f"worker: {(ran.stdout or '').strip()[-200:]}")
 
 
 def phase_critical():
@@ -747,10 +961,11 @@ def phase_critical():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--phase", required=True,
-                        choices=["prepare", "accept", "check", "critical", "late-clock-after-sign"])
+                        choices=["prepare", "accept", "check", "critical", "notify",
+                                   "late-clock-after-sign"])
     args = parser.parse_args()
     {"prepare": phase_prepare, "accept": phase_accept, "check": phase_check,
-     "critical": phase_critical,
+     "critical": phase_critical, "notify": phase_notify,
      "late-clock-after-sign": phase_late_clock_after_sign}[args.phase]()
     if flow.FAILED:
         print(f"\n{len(flow.FAILED)} assertion(s) failed: {', '.join(flow.FAILED)}")

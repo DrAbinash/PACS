@@ -2,10 +2,12 @@ import { openDb } from '@telrad/db';
 import { criticalSweepOnce } from './criticals.js';
 import { dispatchSweep } from './dispatch.js';
 import { escalateOnce } from './escalate.js';
+import { notifyOnce } from './notify.js';
 import { pollOnce, recheckStalled } from './ingest.js';
 import { drainOnce } from './inbox.js';
 import { createOrthancReader, createOrthancWriter } from './orthanc.js';
-import { createCriticalStore, createDispatchStore, createEscalationStore, createInboxStore, createStore } from './store.js';
+import { createSmtpTransport } from './smtp.js';
+import { createCriticalStore, createDispatchStore, createEscalationStore, createInboxStore, createNotifyStore, createStore } from './store.js';
 
 function env(name: string): string {
   const v = process.env[name];
@@ -32,6 +34,29 @@ const inbox = createInboxStore(handle.db);
 const dispatch = createDispatchStore(handle.db);
 const escalation = createEscalationStore(handle.db);
 const criticals = createCriticalStore(handle.db);
+const notifications = createNotifyStore(handle.db);
+// Both halves have to be present before anything leaves. A relay without a public origin would
+// send a message whose only actionable line — "read it here" — is a relative link, which is a
+// letter with no address on it rather than a bug in the mailer.
+const smtp = createSmtpTransport({
+  url: process.env.TR_SMTP_URL ?? null,
+  from: process.env.TR_SMTP_FROM ?? null,
+});
+const publicUrl = (process.env.TR_PUBLIC_URL ?? '').replace(/\/+$/, '');
+
+async function notify(): Promise<void> {
+  if (!smtp.configured) return;
+  if (publicUrl === '') {
+    console.warn('notify skipped: TR_SMTP_URL is set but TR_PUBLIC_URL is not, so the message '
+      + 'would carry no link to the portal');
+    return;
+  }
+  const n = await notifyOnce(notifications, smtp, { portalUrl: `${publicUrl}/portal` });
+  if (n.sent + n.retried + n.dead + n.refused > 0) {
+    console.log(`notify checked=${n.checked} sent=${n.sent} retried=${n.retried} dead=${n.dead} `
+      + `refused=${n.refused} via=${smtp.label}`);
+  }
+}
 const inboxRoot = env('TR_INBOX_ROOT');
 const removeAfterPush = process.env.TR_INBOX_REMOVE_AFTER_PUSH !== 'false';
 
@@ -113,6 +138,14 @@ async function tick(): Promise<void> {
   }
 
   try {
+    // Its own label again: a clinic that was never told about a report is a different outage
+    // from a case that was never routed, and the two queues do not share a failure mode.
+    await notify();
+  } catch (err) {
+    console.error('notify failed', err instanceof Error ? err.message : err);
+  }
+
+  try {
     // Escalate before dispatch so a case that has just crossed its widen threshold can be
     // offered to a fuller reader on this tick rather than the next one; dispatch runs
     // last so a study that just became complete and linked is offered in the same tick it
@@ -126,7 +159,8 @@ async function tick(): Promise<void> {
   }
 }
 
-console.log(`telrad worker starting node=${nodeId} poll=${pollSeconds}s mode=${process.argv[2] ?? 'loop'}`);
+console.log(`telrad worker starting node=${nodeId} poll=${pollSeconds}s mode=${process.argv[2] ?? 'loop'} `
+  + `mail=${smtp.configured ? `smtp via ${smtp.label}` : 'not configured (queued notifications will wait)'}`);
 
 if (process.argv[2] === 'dispatch-once') {
   // The routing half of a tick with no ingest beside it: the critical clocks, then
@@ -136,6 +170,11 @@ if (process.argv[2] === 'dispatch-once') {
   await settleCriticalLoops();
   await escalate();
   await sweep();
+  await handle.close();
+} else if (process.argv[2] === 'notify-once') {
+  // The outbox on its own. A verification run that proves a clinic was told must not also
+  // dispatch, because then the state it ends by asserting is one it caused.
+  await notify();
   await handle.close();
 } else if (process.argv[2] === 'criticals-once') {
   // Only the acknowledgement clocks. A verification run uses this to stamp a breach without

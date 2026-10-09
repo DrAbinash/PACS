@@ -26,6 +26,9 @@ DB_CONTAINER=tr-ci
 DB_PORT=5414
 ORTHANC_CONTAINER=tr-orth
 ORTHANC_PORT=18042
+MAIL_CONTAINER=tr-mail
+SMTP_PORT=1025
+MAIL_API_PORT=8025
 API_PORT=3101
 
 DB_NAME=telrad
@@ -51,6 +54,8 @@ export TR_ORTHANC_PASSWORD="$ORTHANC_PASSWORD"
 export TR_SESSION_SECRET="$SESSION_SECRET"
 export TR_UPLOAD_SIGNING_SECRET="$SIGNING_SECRET"
 export TR_PUBLIC_URL="http://127.0.0.1:$API_PORT"
+export TR_SMTP_URL="smtp://127.0.0.1:$SMTP_PORT"
+export TR_SMTP_FROM="telrad@telrad.test"
 export TR_INBOX_ROOT="$RUNTIME/inbox"
 export TR_NODE_ID=node-test
 export PORT=$API_PORT
@@ -74,7 +79,7 @@ down() {
     kill "$(cat "$RUNTIME/api.pid")" 2>/dev/null || true
     rm -f "$RUNTIME/api.pid"
   fi
-  docker rm -f "$DB_CONTAINER" "$ORTHANC_CONTAINER" >/dev/null 2>&1 || true
+  docker rm -f "$DB_CONTAINER" "$ORTHANC_CONTAINER" "$MAIL_CONTAINER" >/dev/null 2>&1 || true
   docker network rm "$NETWORK" >/dev/null 2>&1 || true
   rm -rf "$RUNTIME"
   say "down: containers, network and $RUNTIME removed"
@@ -82,6 +87,7 @@ down() {
 
 status() {
   docker ps -a --filter "name=^/$DB_CONTAINER$" --filter "name=^/$ORTHANC_CONTAINER$" \
+    --filter "name=^/$MAIL_CONTAINER$" \
     --format '{{.Names}} {{.Status}}'
   if [ -f "$RUNTIME/api.pid" ] && kill -0 "$(cat "$RUNTIME/api.pid")" 2>/dev/null; then
     say "api pid $(cat "$RUNTIME/api.pid") on $API_PORT"
@@ -155,6 +161,19 @@ docker run -d --name "$ORTHANC_CONTAINER" --network "$NETWORK" -p "127.0.0.1:$OR
   -v "$ROOT/infra/orthanc/orthanc.json:/etc/orthanc/orthanc.json:ro" \
   "orthancteam/orthanc@$DIGEST" >/dev/null
 wait_for "image node" 120 curl -fsu "orthanc:$ORTHANC_PASSWORD" "http://127.0.0.1:$ORTHANC_PORT/system"
+
+say "mail sink $MAIL_CONTAINER on 127.0.0.1:$SMTP_PORT (api 127.0.0.1:$MAIL_API_PORT)"
+# Mailpit accepts everything and delivers nowhere. It is the only honest way to prove a
+# notification path on a machine that must never send real mail to a real clinic, and its HTTP
+# api is what lets the flow read the message back rather than trusting the queue's own word.
+docker rm -f "$MAIL_CONTAINER" >/dev/null 2>&1 || true
+docker run -d --name "$MAIL_CONTAINER" --network "$NETWORK" \
+  -p "127.0.0.1:$SMTP_PORT:1025" -p "127.0.0.1:$MAIL_API_PORT:8025" \
+  -e TZ=UTC axllent/mailpit >/dev/null
+# `/api/v1/messages` rather than `/api/v1/summary`: the message list answers 200 on every
+# version of this image, and a readiness probe against an endpoint that a minor release moved
+# is how a stack that is fine gets torn down as failed.
+wait_for "mail sink" 90 curl -fs "http://127.0.0.1:$MAIL_API_PORT/api/v1/messages"
 
 say "migrations"
 (cd "$ROOT/packages/db" && pnpm exec tsx src/migrate.ts) | tail -1

@@ -1,0 +1,1 @@
+ALTER TABLE "telrad"."orders" ADD COLUMN "referring_email" text;

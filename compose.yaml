@@ -139,6 +139,13 @@ services:
       TR_INBOX_ROOT: /app/inbox
       TR_INBOX_REMOVE_AFTER_PUSH: ${TR_INBOX_REMOVE_AFTER_PUSH:-true}
       TR_WORKER_POLL_SECONDS: ${TR_WORKER_POLL_SECONDS:-10}
+      # The notification outbox. Both are optional and their absence is a documented state,
+      # not a silent one: with no relay the queue keeps its rows and says so at boot, so a
+      # deployment can be brought up and verified before anybody decides who may send mail.
+      # Set them empty rather than pointing at a relay that will bounce to a real clinic.
+      TR_SMTP_URL: ${TR_SMTP_URL:-}
+      TR_SMTP_FROM: ${TR_SMTP_FROM:-}
+      TR_PUBLIC_URL: ${TR_PUBLIC_URL:-}
       TR_LOG_LEVEL: ${TR_LOG_LEVEL:-info}
       TZ: UTC
     depends_on:

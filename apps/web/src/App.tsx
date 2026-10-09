@@ -9,6 +9,7 @@ import {
   type PanelRow,
   type PresenceColor,
   type MyReportItem,
+  type NoticeItem,
   type ReviewItem,
   type Session,
   type WorkCase,
@@ -16,7 +17,7 @@ import {
 
 import Viewer from './Viewer';
 import { CriticalBoard } from './Critical';
-import { explainCode } from './Report';
+import { explainCode, retryLabel } from './Report';
 
 const HEARTBEAT_MS = 20_000;
 const REFRESH_MS = 5_000;
@@ -378,6 +379,67 @@ function AwaitingDelivery({ show, canOpen, onOpen }: {
   );
 }
 
+// The notices that have not reached a clinic. A report can be released, correctly, with a
+// signature and a hash and an audit row, and the referring doctor can still not know it exists
+// — which is the failure this card is the only place in the product that says out loud. `dead`
+// rows stay here until a person does something, because a queue that quietly gives up is worse
+// than no queue at all.
+function NoticeQueue({ show, canOpen, onOpen }: {
+  show: boolean;
+  canOpen: boolean;
+  onOpen: (studyId: number) => void;
+}) {
+  const [rows, setRows] = useState<NoticeItem[]>([]);
+
+  const load = useCallback(async () => {
+    try {
+      setRows((await api.notices()).outbox);
+    } catch {
+      // The board keeps its last list on a dropped feed: a stale queue of notices is still a
+      // queue, and the page already carries the banner that says the feed is down.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!show) return;
+    void load();
+    const timer = setInterval(() => void load(), REFRESH_MS * 3);
+    return () => clearInterval(timer);
+  }, [show, load]);
+
+  if (!show || rows.length === 0) return null;
+  const dead = rows.filter((r) => r.status === 'dead').length;
+
+  return (
+    <div className="card">
+      <h2>
+        Notices waiting
+        <span className={`count ${dead > 0 ? 'amber' : 'green'}`}>
+          {rows.length} unsent{dead > 0 ? ` · ${dead} given up on` : ''}
+        </span>
+      </h2>
+      {rows.map((n) => (
+        <div className="workcase" key={n.id}>
+          <div className="who">
+            <strong>{n.accession ?? `report ${n.reportId}`}</strong>
+            <div className="sub">
+              v{n.version} · <span className={`state ${n.status === 'dead' ? 'red' : n.status === 'failed' ? 'amber' : ''}`}>{n.status}</span>
+              {' · '}{n.channel} to {n.recipient}
+            </div>
+            <div className="sub">
+              attempt {n.attemptNo}
+              {` · ${retryLabel(n.nextAttemptAt)}`}
+              {n.errorCode ? ` · ${n.errorCode}` : ''}
+              {n.tenantCode ? ` · ${n.tenantCode}` : ''}
+            </div>
+          </div>
+          {canOpen && <button onClick={() => onOpen(n.studyId)}>Open</button>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // The operator's other half of the board: not who is free, but what is running out and
 // whether the system has done anything about it yet. A case that cannot be routed shows
 // the closest reader and the reason they were skipped, because "unassigned" on its own is
@@ -641,6 +703,8 @@ export default function App() {
         {isDesk && <CriticalBoard show={isDesk} canOpen={isOperator} onOpen={setOpenStudy} />}
 
         {isDesk && <AwaitingDelivery show={isDesk} canOpen={isOperator} onOpen={setOpenStudy} />}
+
+        {isDesk && <NoticeQueue show={isDesk} canOpen={isOperator} onOpen={setOpenStudy} />}
 
         {isOperator && <Waiting show={isOperator} onOpen={setOpenStudy} />}
 
