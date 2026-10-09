@@ -10,7 +10,12 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16-alpine
+        # The official image, pulled from ECR Public rather than Docker Hub. GitHub runners
+        # share Docker Hub's anonymous pull quota and lose it — measured on 2026-10-09, when
+        # a green `pnpm check` locally showed up as `toomanyrequests` before a single step
+        # ran. A gate that fails on somebody else's rate limit is a gate people route around,
+        # and the same image is here under a different registry name.
+        image: public.ecr.aws/docker/library/postgres:16-alpine
         env:
           POSTGRES_DB: telrad
           POSTGRES_USER: telrad
@@ -47,12 +52,14 @@ jobs:
       # a deployment failure there; `vite build` is also the only thing that checks
       # the tsx actually compiles for a browser.
       - run: pnpm --filter @telrad/web build
+      # Applies every migration against a real Postgres and asserts the refusal to
+      # touch `public`. This is the step that proves the schema is deployable, and it was a
+      # comment with no step beneath it: the service container was started for nothing and the
+      # migrations had never once run in CI.
+      - run: pnpm db:migrate
       # Generated SQL is part of the product: an uncommitted schema change should
       # fail here rather than at a deployment.
       - run: pnpm db:generate && git diff --exit-code packages/db/migrations
-      # Applies every migration against a real Postgres and asserts the refusal to
-      # touch `public`. This is the step that proves the schema is deployable.
-      - run: pnpm db:migrate
       - run: pnpm --filter @telrad/api exec node --input-type=module -e "1"
       - run: bash scripts/doctor/check-secrets.sh
       - run: bash scripts/doctor/check-config.sh
