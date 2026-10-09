@@ -15,6 +15,52 @@ import { ah, errorHandler } from '../src/handler.js';
 // closes it, and the first two make it impossible to add a route outside it.
 
 const REGISTRATION = /^\s*\w+\.(get|post|put|patch|delete)\(/;
+const ROUTE = /^\s*\w+\.(get|post|put|patch|delete)\(\s*'([^']+)'/;
+
+type Declared = { method: string; path: string; parent: string; param: boolean; n: number };
+
+// A literal path at the same depth under the same parent, declared after a parameter path,
+// can never be reached: `:id` matched it first.
+const unreachableAfter = (literal: Declared, param: Declared): boolean =>
+  literal.method === param.method
+  && literal.parent === param.parent
+  && !literal.param && param.param
+  && literal.n > param.n;
+
+// Two failures in this repository came from Express matching a parameter path before the
+// literal one declared after it — `/reports/awaiting-review` answered 400 `bad_id`, and the
+// site agent's upload channel was refused by another router's session guard. The second was
+// fixed structurally by `scoped()`; the first was fixed by a comment telling the next person
+// to declare it earlier. A comment is not a guard, so this is one.
+function shadowedRoutes(text: string): string[] {
+  const declared: Declared[] = [];
+  text.split('\n').forEach((line, i) => {
+    const found = ROUTE.exec(line);
+    const method = found?.[1];
+    const routePath = found?.[2];
+    if (!method || !routePath) return;
+    const segments = routePath.split('/').filter((s) => s !== '');
+    const last = segments[segments.length - 1] ?? '';
+    if (segments.length === 0) return;
+    declared.push({
+      method,
+      path: routePath,
+      parent: segments.slice(0, -1).join('/'),
+      param: last.startsWith(':'),
+      n: i + 1,
+    });
+  });
+
+  const problems: string[] = [];
+  for (const param of declared) {
+    for (const literal of declared) {
+      if (unreachableAfter(literal, param)) {
+        problems.push(`${param.path} (line ${param.n}) swallows ${literal.path} (line ${literal.n})`);
+      }
+    }
+  }
+  return problems;
+}
 
 function sources(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
@@ -56,6 +102,28 @@ describe('the route surface of the API', () => {
       .filter((entry) => entry.line.includes('async (') && !entry.line.includes('ah(async ('))
       .map((entry) => `${path.relative(process.cwd(), entry.file)}:${entry.n}: ${entry.line.trim()}`);
     expect(bare).toEqual([]);
+  });
+
+  it('declares no literal path behind the parameter path that would swallow it', () => {
+    const problems = sources(fileURLToPath(new URL('../src', import.meta.url)))
+      .flatMap((file) => shadowedRoutes(readFileSync(file, 'utf8'))
+        .map((p) => `${path.relative(process.cwd(), file)}: ${p}`));
+    expect(problems).toEqual([]);
+  });
+
+  it('actually detects the ordering it guards against', () => {
+    // A guard that cannot fail is decoration. This is the shape the reports router had.
+    expect(shadowedRoutes([
+      "r.get('/reports/:id', ah(async (_req, res) => res.end()));",
+      "r.get('/reports/awaiting-delivery', ah(async (_req, res) => res.end()));",
+    ].join('\n'))).toEqual(['/reports/:id (line 1) swallows /reports/awaiting-delivery (line 2)']);
+
+    // And does not report the cases that are fine: the literal first, or a deeper path.
+    expect(shadowedRoutes([
+      "r.get('/reports/mine', ah(async (_req, res) => res.end()));",
+      "r.get('/reports/:id', ah(async (_req, res) => res.end()));",
+      "r.get('/reports/:id/pdf', ah(async (_req, res) => res.end()));",
+    ].join('\n'))).toEqual([]);
   });
 });
 

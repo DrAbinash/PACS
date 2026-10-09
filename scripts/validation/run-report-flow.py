@@ -74,6 +74,27 @@ def report_of(api, study_id):
     return api.call("GET", f"/v1/reports/current?studyId={study_id}")
 
 
+def fetch_bytes(api, path):
+    """A PDF is bytes, not JSON, and the shared helper decodes. The cookie jar and the
+    bearer token come from the same session, so this is the same request the browser makes."""
+    import urllib.request
+    req = urllib.request.Request(api.base + path, method="GET",
+                                 headers={"Authorization": "Bearer " + api.bearer} if api.bearer else {})
+    try:
+        with api.opener.open(req, timeout=30) as res:
+            return res.status, res.read(), dict(res.headers)
+    except urllib.error.HTTPError as err:
+        return err.code, err.read(), dict(err.headers)
+
+
+def psql(sql):
+    out = subprocess.run(["docker", "exec", "tr-ci", "psql", "-U", "telrad", "-d", "telrad",
+                          "-t", "-A", "-c", sql], capture_output=True, text=True)
+    if out.returncode != 0:
+        return f"ERROR {out.stderr.strip()[:160]}"
+    return out.stdout.strip()
+
+
 def phase_prepare():
     api = flow.owner()
     today = datetime.date.today().strftime("%Y%m%d")
@@ -253,6 +274,80 @@ def phase_check():
     flow.check("a report is cleared once", status == 422 and body.get("error") == "not_signed",
                f"{status} {body}")
 
+    # ---- delivery -------------------------------------------------------------------
+    # `verified` is the first state a document may leave in, and this is where
+    # sub_specialties.requires_reviewer stops being a caption on the screen.
+    status, body = ops.call("GET", "/v1/reports/awaiting-delivery")
+    listed = [d for d in body.get("awaiting", []) if d.get("reportId") == report_id]
+    flow.check("the desk lists the cleared report as waiting to go",
+               status == 200 and len(listed) == 1 and listed[0].get("deliverable") is True,
+               f"{status} {json.dumps(listed)[:160]}")
+    flow.check("and names the clinician it goes to",
+               listed and listed[0].get("referringName") == "Dr Referrer",
+               json.dumps(listed[0].get("referringName") if listed else None))
+
+    status, body = green.call("GET", "/v1/reports/awaiting-delivery")
+    flow.check("a reader has no delivery board", status == 403, f"{status} {body}")
+
+    status, pdf, headers = fetch_bytes(ops, f"/v1/reports/{report_id}/pdf")
+    first_sha = hashlib.sha256(pdf).hexdigest()
+    flow.check("the PDF is a PDF, sent as an attachment and never cached",
+               status == 200 and pdf[:5] == b"%PDF-"
+               and headers.get("Content-Type") == "application/pdf"
+               and headers.get("Cache-Control") == "no-store"
+               and "telrad-ACC-REP-1-v1.pdf" in headers.get("Content-Disposition", ""),
+               f"{status} {json.dumps({k: headers.get(k) for k in ('Content-Type', 'Cache-Control', 'Content-Disposition')})}")
+    status, pre_body = ops.call("GET", f"/v1/reports/{report_id}")
+    pre = pre_body.get("report", {})
+    flow.check("nothing is recorded as delivered before the act",
+               pre.get("state") == "verified" and pre.get("deliveredAt") is None
+               and pre.get("delivery", {}).get("pdfSha256") is None,
+               json.dumps([pre.get("state"), pre.get("deliveredAt"),
+                           pre.get("delivery", {}).get("pdfSha256")])[:160])
+    flow.check("the desk is told it may release this one",
+               pre.get("can", {}).get("deliver") is True and pre.get("can", {}).get("download") is True,
+               json.dumps(pre.get("can"))[:180])
+    status, reader_body = green.call("GET", f"/v1/reports/{report_id}")
+    flow.check("and a reader holding it sees the document, not the release button",
+               reader_body.get("report", {}).get("can", {}).get("showDelivery") is False
+               and reader_body.get("report", {}).get("can", {}).get("download") is True,
+               json.dumps(reader_body.get("report", {}).get("can"))[:180])
+
+    status, body = green.call("POST", f"/v1/reports/{report_id}/deliver", {})
+    flow.check("the reader who signed it cannot release it", status == 403, f"{status} {body}")
+
+    status, body = ops.call("POST", f"/v1/reports/{report_id}/deliver", {})
+    delivered = body.get("report", {})
+    flow.check("the desk delivers it", status == 200 and delivered.get("state") == "delivered",
+               f"{status} {json.dumps(body)[:140]}")
+    flow.check("delivery records the hash of the document that left",
+               delivered.get("delivery", {}).get("pdfSha256") == first_sha
+               and bool(delivered.get("deliveredAt")),
+               json.dumps([delivered.get("delivery", {}).get("pdfSha256"), first_sha])[:160])
+
+    status, body = ops.call("POST", f"/v1/reports/{report_id}/deliver", {})
+    flow.check("and it goes once", status == 422 and body.get("error") == "already_delivered",
+               f"{status} {body}")
+
+    status, body = ops.call("GET", "/v1/reports/awaiting-delivery")
+    gone = [d for d in body.get("awaiting", []) if d.get("reportId") == report_id]
+    flow.check("a delivered report leaves the desk's waiting list", gone == [], json.dumps(gone)[:120])
+
+    status, again, _ = fetch_bytes(ops, f"/v1/reports/{report_id}/pdf")
+    flow.check("re-rendering the delivered report produces the same bytes, so the hash means something",
+               status == 200 and hashlib.sha256(again).hexdigest() == first_sha,
+               f"{status} {hashlib.sha256(again).hexdigest()[:16]} vs {first_sha[:16]}")
+
+    stamped = psql(f"select count(*) from telrad.sla_clocks c join telrad.studies s on s.id = c.study_id "
+                   f"where s.accession_number = '{ACC}' and c.delivered_at is not null;")
+    flow.check("the clock carries the delivery time", stamped.strip() == "1", stamped)
+
+    delivery_row = psql("select d.channel || '|' || d.status || '|' || d.idempotency_key || '|' || d.recipient "
+                        "from telrad.report_deliveries d "
+                        f"join telrad.reports r on r.id = d.report_id where r.id = {report_id};")
+    flow.check("one sent delivery row, keyed to this report version",
+               delivery_row.strip() == f"portal|sent|report:{report_id}:v1:portal|Dr Referrer", delivery_row)
+
     # ---- amendment ------------------------------------------------------------------
     status, body = second.call("POST", f"/v1/reports/{report_id}/amend", {})
     flow.check("an amendment without a reason is refused",
@@ -302,6 +397,46 @@ def phase_check():
     flow.check("the amended report has to be signed again", status == 200
                and body.get("report", {}).get("state") == "signed", f"{status} {json.dumps(body)[:120]}")
 
+    status, body = ops.call("POST", f"/v1/reports/{v2_id}/deliver", {})
+    flow.check("an unsigned second name stops the corrected version leaving",
+               status == 422 and body.get("error") == "review_required", f"{status} {body}")
+
+    status, body = ops.call("GET", "/v1/reports/awaiting-delivery")
+    waiting = [d for d in body.get("awaiting", []) if d.get("reportId") == v2_id]
+    flow.check("and the desk can see why, on the row, without asking",
+               len(waiting) == 1 and waiting[0].get("deliverable") is False
+               and waiting[0].get("reason") == "review_required"
+               and waiting[0].get("needsSecondName") is True,
+               f"{status} {json.dumps(waiting)[:200]}")
+
+    status, body = ops.call("GET", f"/v1/reports/{report_id}")
+    history_row = body.get("report", {})
+    flow.check("superseding a delivered report does not erase that it was delivered",
+               history_row.get("state") == "amended" and bool(history_row.get("deliveredAt"))
+               and bool(history_row.get("delivery", {}).get("pdfSha256")),
+               json.dumps([history_row.get("state"), history_row.get("deliveredAt"),
+                           (history_row.get("delivery", {}).get("pdfSha256") or "")[:12]])[:160])
+
+    flow.check("and the version that replaced it is named, not inferred",
+               history_row.get("supersededByVersion") == 2
+               and history_row.get("can", {}).get("download") is True,
+               json.dumps([history_row.get("supersedesVersion"), history_row.get("supersededByVersion")]))
+
+    status, old_pdf, _ = fetch_bytes(ops, f"/v1/reports/{report_id}/pdf")
+    drift = hashlib.sha256(old_pdf).hexdigest()
+    flow.check("a superseded version still renders, and is a different document from the one sent",
+               status == 200 and old_pdf[:5] == b"%PDF-"
+               and drift != (history_row.get("delivery", {}).get("pdfSha256") or ""),
+               f"{status} {drift[:16]} vs record {(history_row.get('delivery', {}).get('pdfSha256') or '')[:16]}")
+    # The banner naming v2 changes the bytes, so the hash of what was delivered no longer
+    # matches a fresh render. That is recorded rather than hidden: the audit row carries both
+    # values and says they do not match, which is the honest answer to "is this the PDF we got".
+    drifted = psql("select count(*) from telrad.audit_log where action = 'report.pdf_downloaded' "
+                   f"and entity_id = '{report_id}' and detail->>'matchesRecord' = 'false' "
+                   f"and detail->>'recordSha256' = '{first_sha}';")
+    flow.check("and the mismatch against the delivered record is written down",
+               drifted.strip() == "1", drifted)
+
     # ---- what an operator can see ---------------------------------------------------
     mine_green = [m["reportId"] for m in green.call("GET", "/v1/reports/mine")[1].get("reports", [])]
     flow.check("the author can find the version they signed, which is now history",
@@ -314,7 +449,8 @@ def phase_check():
                status == 200 and body.get("report", {}).get("id") == report_id, str(status))
 
     actions = [e.get("action") for e in ops.call("GET", "/v1/audit/latest")[1].get("entries", [])]
-    for needed in ["report.signed", "report.countersigned", "report.amended", "report.draft_saved"]:
+    for needed in ["report.signed", "report.countersigned", "report.amended", "report.draft_saved",
+                   "report.delivered", "report.pdf_downloaded", "report.delivery_queue"]:
         flow.check(f"the audit chain carries {needed}", needed in actions, json.dumps(actions[:12]))
 
 

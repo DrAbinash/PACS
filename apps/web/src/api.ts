@@ -128,7 +128,8 @@ export type ViewDescriptor = {
   // assignment — routing keeps exactly one live lock per study — and signing completes the
   // read, so without this an author could not look again at what they described.
   reportAccess: {
-    reportId: number; version: number; state: ReportState; author: number; as: 'author' | 'review';
+    reportId: number; version: number; state: ReportState; author: number;
+    as: 'author' | 'review' | 'read';
   } | null;
   series: {
     index: number;
@@ -183,22 +184,41 @@ export type ReportView = {
   deliveredAt: string | null;
   supersedesReportId: number | null;
   supersedesVersion: number | null;
+  // Which later version replaced this one, when it was superseded. The row itself only
+  // points backwards, so the screen needs the forward link to say "v1, replaced by v2".
+  supersededByVersion: number | null;
   amendmentReason: string | null;
   createdAt: string;
   gaps: ReportSection[];
   // The server's own answer about what this reader may do to this document, so the panel
-  // cannot offer a button the route is going to refuse.
-  can: { edit: boolean; sign: boolean; countersign: boolean; amend: boolean; withdraw: boolean };
+  // cannot offer a button the route is going to refuse. `deliver` is role-gated: releasing
+  // the report to the clinic is a desk act, not a reading act.
+  can: {
+    edit: boolean; sign: boolean; countersign: boolean; amend: boolean; withdraw: boolean;
+    deliver: boolean; download: boolean; showDelivery: boolean;
+  };
+  delivery: {
+    channel: 'portal';
+    recipient: string;
+    // The refusal the desk would get, so the button can be labelled with its reason instead
+    // of being hidden — a row that silently has no button is a row nobody chases.
+    decision: string | null;
+    pdfSha256: string | null;
+  };
   history: {
     id: number; version: number; state: ReportState; authorName: string;
+    supersedesReportId: number | null;
     signedAt: string | null; verifiedAt: string | null;
   }[];
   study: {
     accession: string | null; modality: string | null; subSpecialty: string | null;
     priority: string | null; studyDate: string | null; tenantCode: string | null;
-    requiresReviewer: boolean;
+    centreName: string | null; requiresReviewer: boolean; needsSecondName: boolean;
   };
-  patient: { name: string | null; mrn: string | null; dob: string | null; gender: string | null };
+  patient: {
+    name: string | null; mrn: string | null; dob: string | null;
+    age: string | null; gender: string | null;
+  };
 };
 
 export type MyReportItem = {
@@ -217,7 +237,8 @@ export type MyReportItem = {
   tenantCode: string | null;
 };
 
-export type ReviewItem = {  reportId: number;
+export type ReviewItem = {
+  reportId: number;
   studyId: number;
   version: number;
   authorName: string;
@@ -228,6 +249,31 @@ export type ReviewItem = {  reportId: number;
   requiresReviewer: boolean | null;
   mayClear: boolean;
   reason: string | null;
+};
+
+// The desk's list. Every row carries the reason it is still here, which is the whole
+// point: "signed and waiting for a second name" and "signed, ready to go" look identical
+// to a center until someone says so.
+export type DeliveryItem = {
+  reportId: number;
+  studyId: number;
+  version: number;
+  state: ReportState;
+  signedAt: string | null;
+  verifiedAt: string | null;
+  reviewerUserId: number | null;
+  accession: string | null;
+  modality: string | null;
+  subSpecialty: string | null;
+  priority: string | null;
+  requiresReviewer: boolean | null;
+  patientName: string | null;
+  patientMrn: string | null;
+  referringName: string | null;
+  tenantCode: string | null;
+  deliverable: boolean;
+  reason: string | null;
+  needsSecondName: boolean;
 };
 
 export const api = {
@@ -285,6 +331,14 @@ export const api = {
   awaitingReview: () =>
     call<{ generatedAt: string; myGrade: string | null; awaiting: ReviewItem[] }>('/v1/reports/awaiting-review'),
   myReports: () => call<{ generatedAt: string; reports: MyReportItem[] }>('/v1/reports/mine'),
+  deliverReport: (id: number) =>
+    call<{ report: ReportView }>(`/v1/reports/${id}/deliver`, { method: 'POST', body: '{}' }),
+  awaitingDelivery: () => call<{
+    generatedAt: string; counts: { total: number; ready: number }; awaiting: DeliveryItem[];
+  }>('/v1/reports/awaiting-delivery'),
+  // Not a fetch: the browser takes the bytes and honours the Content-Disposition the route
+  // sets, so the filename is decided by the server that knows the accession.
+  pdfHref: (id: number) => `/v1/reports/${id}/pdf`,
 };
 
 async function frame(studyId: number, pk: string, index: number): Promise<ArrayBuffer> {

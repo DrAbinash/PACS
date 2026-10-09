@@ -149,6 +149,10 @@ form.login input { background: #0e141c; border: 1px solid var(--line); color: va
   border-radius: 8px; padding: 7px 9px; font: inherit;
 }
 .report .link { background: none; border: 0; color: var(--text); padding: 0; text-decoration: underline; }
+
+/* A real anchor used as an action in the desk board: the PDF is a download, not a
+   navigation, so it must not be styled as a button that could be double-clicked. */
+a.link { color: var(--text); font-size: 13px; text-decoration: underline; white-space: nowrap; }
 .report .note { color: var(--muted); font-size: 13px; border-left: 2px solid var(--line); padding-left: 10px; }
 
 /* The printed part. Separated because it is the half a center files and a patient asks

@@ -12,6 +12,12 @@ const LABEL: Record<ReportSection, string> = {
   recommendation: 'Recommendation',
 };
 
+const DELIVERY_TEXT: Record<string, string> = {
+  not_signed: 'No signature on this version yet, so there is nothing to release.',
+  review_required: 'This sub-specialty needs a second name before the clinic can be sent the report.',
+  already_delivered: 'Already released to the clinic.',
+};
+
 const ROWS: Record<ReportSection, number> = {
   clinicalHistory: 2,
   technique: 2,
@@ -201,6 +207,34 @@ export default function ReportPanel({ studyId, onChanged }: { studyId: number; o
         </div>
       )}
 
+      {(view.can.showDelivery || view.can.download) && (
+        <div className="acts">
+          {view.can.showDelivery && (view.can.deliver ? (
+            <button
+              className="primary"
+              disabled={busy}
+              onClick={() => void run(() => api.deliverReport(view.id).then((r) => r.report))}
+            >
+              Deliver to {view.delivery.recipient}
+            </button>
+          ) : (
+            // The reason rather than a missing button. A desk that cannot see why a signed
+            // report has not gone out will assume the system forgot it.
+            <span className="state amber">
+              {view.delivery.decision
+                ? DELIVERY_TEXT[view.delivery.decision] ?? explainCode(view.delivery.decision)
+                : 'cannot be released yet'}
+            </span>
+          ))}
+          {view.can.download && (
+            <a className="link" href={api.pdfHref(view.id)}>Download the PDF</a>
+          )}
+          {view.delivery.pdfSha256 && (
+            <span className="sub">delivered PDF sha256 {view.delivery.pdfSha256.slice(0, 12)}…</span>
+          )}
+        </div>
+      )}
+
       <div className="signatures">
         <p>
           <span className="sub">Signed</span>
@@ -269,6 +303,9 @@ export function explainCode(code: string): string {
     case 'report_exists': return 'This case already has a report.';
     case 'not_a_draft': return 'That draft has already been signed.';
     case 'not_signed': return 'Nothing on this report is waiting for a second name.';
+    case 'review_required': return 'This sub-specialty requires a second name before the clinic can be sent the report.';
+    case 'already_delivered': return 'This version has already been released to the clinic.';
+    case 'not_deliverable': return 'The state of this report changed under the request, so nothing was released. Reload it.';
     case 'no_report': return 'No report on this case yet.';
     default: return code;
   }

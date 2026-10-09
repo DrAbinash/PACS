@@ -3,6 +3,7 @@ import {
   api,
   ApiError,
   type BlockedCase,
+  type DeliveryItem,
   type LateCase,
   type Panel,
   type PanelRow,
@@ -20,6 +21,18 @@ const HEARTBEAT_MS = 20_000;
 const REFRESH_MS = 5_000;
 const READER_ROLES = ['radiologist', 'reviewer'];
 const OPERATOR_ROLES = ['owner', 'console'];
+// Who releases a report to the clinic. Wider than the operator roles because the desk at
+// the center is the one that knows whether the referring clinician is waiting for it, and
+// narrower than the readers on purpose: the person under time pressure to sign a case is
+// not the person who decides it leaves.
+const DESK_ROLES = ['center_staff', 'owner', 'console'];
+// The refusal codes the delivery decision answers with, in the few words a board row can
+// carry. The long sentence belongs next to the button, not in the badge.
+const SHORT_REASON: Record<string, string> = {
+  review_required: 'awaiting a second name',
+  not_signed: 'not signed yet',
+  already_delivered: 'already sent',
+};
 
 type Mine = { color: PresenceColor; code: string; label: string; routable: boolean; openCases: number; maxQueueSize: number };
 
@@ -272,6 +285,97 @@ function MyReports({ show, onOpen }: { show: boolean; onOpen: (studyId: number) 
   );
 }
 
+// What the clinic has not been sent yet. This is the desk's list, and every row carries
+// the reason it is still here: a signed MRI waiting on a second name and a signed chest
+// film that never needed one both read "not delivered", and only one of them is somebody's
+// action. Before delivery existed, a report that had been signed and cleared simply stopped
+// appearing anywhere — the reader's desk had released it and the center had no row to look
+// at.
+function AwaitingDelivery({ show, canOpen, onOpen }: {
+  show: boolean;
+  // The platform roles can open the images as well as release the document; a center desk
+  // account gets the paper, not the patient's studies, which is the narrower permission and
+  // the one the viewer enforces.
+  canOpen: boolean;
+  onOpen: (studyId: number) => void;
+}) {
+  const [rows, setRows] = useState<DeliveryItem[]>([]);
+  const [busy, setBusy] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setRows((await api.awaitingDelivery()).awaiting);
+    } catch {
+      // The board already carries the "feed lost" banner for an unreachable server.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!show) return;
+    void load();
+    const timer = setInterval(() => void load(), REFRESH_MS * 2);
+    return () => clearInterval(timer);
+  }, [show, load]);
+
+  if (!show || rows.length === 0) return null;
+
+  const deliver = async (reportId: number) => {
+    setBusy(reportId);
+    setError(null);
+    try {
+      await api.deliverReport(reportId);
+      await load();
+    } catch (err) {
+      setError(explainCode(err instanceof ApiError ? err.code ?? '' : String(err)));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="card">
+      <h2>Awaiting delivery</h2>
+      {error && <div className="error">{error}</div>}
+      {rows.map((r) => (
+        <div className="workcase" key={r.reportId}>
+          <div className="who">
+            <strong>{r.accession ?? `study ${r.studyId}`}</strong>
+            <div className="sub">
+              {r.modality ?? '?'} {r.subSpecialty ?? ''} · {r.patientName ?? 'name not carried'}
+              {r.patientMrn ? ` · ${r.patientMrn}` : ''} · {r.tenantCode}
+            </div>
+            <div className="sub">
+              v{r.version} · <span className={`state ${r.state === 'verified' ? 'green' : 'amber'}`}>{r.state}</span>
+              {r.signedAt ? ` · signed ${new Date(r.signedAt).toLocaleString()}` : ''}
+              {' · to '}
+              {r.referringName ?? 'no referring clinician recorded'}
+            </div>
+            {r.needsSecondName && (
+              <div className="sub">blocked: this sub-specialty needs a second name</div>
+            )}
+          </div>
+          {r.deliverable ? (
+            <button
+              className="primary"
+              disabled={busy !== null}
+              onClick={() => void deliver(r.reportId)}
+            >
+              {busy === r.reportId ? 'Delivering' : 'Deliver'}
+            </button>
+          ) : (
+            <span className="state amber">
+              {(r.reason !== null && SHORT_REASON[r.reason]) ?? r.reason ?? 'cannot be released'}
+            </span>
+          )}
+          {canOpen && <button onClick={() => onOpen(r.studyId)}>Open</button>}
+          <a className="link" href={api.pdfHref(r.reportId)}>PDF</a>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // The operator's other half of the board: not who is free, but what is running out and
 // whether the system has done anything about it yet. A case that cannot be routed shows
 // the closest reader and the reason they were skipped, because "unassigned" on its own is
@@ -403,6 +507,7 @@ export default function App() {
   const [openStudy, setOpenStudy] = useState<number | null>(null);
 
   const isReader = session !== null && READER_ROLES.includes(session.user.role);
+  const isDesk = session !== null && DESK_ROLES.includes(session.user.role);
   const isOperator = session !== null && OPERATOR_ROLES.includes(session.user.role);
 
   useEffect(() => {
@@ -530,6 +635,8 @@ export default function App() {
         {isReader && <ReviewQueue show onOpen={setOpenStudy} />}
 
         {isReader && <MyReports show onOpen={setOpenStudy} />}
+
+        {isDesk && <AwaitingDelivery show={isDesk} canOpen={isOperator} onOpen={setOpenStudy} />}
 
         {isOperator && <Waiting show={isOperator} onOpen={setOpenStudy} />}
 

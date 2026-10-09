@@ -1,6 +1,6 @@
 import { and, eq, inArray } from 'drizzle-orm';
 import { type Db, appendAudit, assignments, patients, reports, studies, storageNodes } from '@telrad/db';
-import { currentVersion, frameToBytes, parseMatlabFrame, tagValue } from '@telrad/shared';
+import { currentVersion, frameToBytes, mayReadReport, parseMatlabFrame, tagValue } from '@telrad/shared';
 import { Router, type Response } from 'express';
 import { OrthancError, type OrthancClient } from '../orthanc.js';
 import { requireAuth, requireRole, scoped, scopeTenant, type Ctx } from '../auth.js';
@@ -84,6 +84,16 @@ export function viewRouter(db: Db, orthanc: OrthancClient): Router {
       });
       return { row: null, status: 404 as const, hold: null, access: null };
     }
+    // Which version a study answers with is the same question for a reader, a reviewer and
+    // the desk, so it is asked once here rather than once per branch.
+    const versions = await db.select({
+      reportId: reports.id,
+      version: reports.version,
+      state: reports.state,
+      author: reports.authorUserId,
+    }).from(reports).where(eq(reports.studyId, studyId));
+    const live = currentVersion(versions);
+
     if (READER_ROLES.includes(principal.role)) {
       const [held] = await db.select({ id: assignments.id, state: assignments.state }).from(assignments)
         .where(and(
@@ -98,13 +108,6 @@ export function viewRouter(db: Db, orthanc: OrthancClient): Router {
       // read and takes the case off their desk — and the reader being asked for a second
       // name must be able to check it before giving it. One live lock per study is a
       // routing rule, and neither of these may steal it.
-      const versions = await db.select({
-        reportId: reports.id,
-        version: reports.version,
-        state: reports.state,
-        author: reports.authorUserId,
-      }).from(reports).where(eq(reports.studyId, studyId));
-      const live = currentVersion(versions);
       if (live && live.author === principal.userId) {
         return { row, status: 200 as const, hold: null, access: { ...live, as: 'author' as const } };
       }
@@ -113,7 +116,21 @@ export function viewRouter(db: Db, orthanc: OrthancClient): Router {
       }
       return { row, status: 403 as const, hold: null, access: null };
     }
-    return { row, status: 200 as const, hold: null, access: null };
+
+    // Not a reader: the platform roles and the center desk. They may open the images — the
+    // operator's late board is why — and the report comes with them when that role is
+    // allowed to read it, which is the same `mayReadReport` rule the report routes apply, so
+    // a desk account is never handed somebody's half-written draft through the viewer.
+    const readable = live !== null && mayReadReport({
+      state: live.state,
+      authorUserId: live.author,
+      readerUserId: principal.userId,
+      readerRole: principal.role,
+    });
+    return {
+      row, status: 200 as const, hold: null,
+      access: readable ? { ...live, as: 'read' as const } : null,
+    };
   }
 
   function denied(res: Response, status: number) {

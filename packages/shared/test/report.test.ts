@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  amendDecision, countersignDecision, currentVersion, isBlank, mayReadReport, missingSections,
+  amendDecision, countersignDecision, currentVersion, deliverDecision, deliveryIdempotencyKey,
+  isBlank, mayReadReport, missingSections, needsSecondName,
   nextVersion, signDecision, stateAllows,
 } from '../src/report.js';
 import type { ReportState } from '../src/enums.js';
@@ -35,6 +36,15 @@ describe('stateAllows', () => {
     expect(stateAllows('amend', 'amended')).toBe(false);
     expect(stateAllows('withdraw', 'draft')).toBe(true);
     expect(stateAllows('withdraw', 'signed')).toBe(false);
+  });
+
+  it('delivers only what has been signed, and never a second time', () => {
+    expect(stateAllows('deliver', 'draft')).toBe(false);
+    expect(stateAllows('deliver', 'signed')).toBe(true);
+    expect(stateAllows('deliver', 'verified')).toBe(true);
+    expect(stateAllows('deliver', 'delivered')).toBe(false);
+    expect(stateAllows('deliver', 'amended')).toBe(false);
+    expect(stateAllows('deliver', 'withdrawn')).toBe(false);
   });
 });
 
@@ -209,5 +219,54 @@ describe('mayReadReport', () => {
   it('lets the platform roles read anything', () => {
     expect(asCenter('withdrawn', 'owner')).toBe(true);
     expect(asCenter('draft', 'console')).toBe(true);
+  });
+});
+
+describe('deliverDecision', () => {
+  it('refuses a draft, because there is nothing signed to hand over', () => {
+    expect(deliverDecision({ state: 'draft', requiresReviewer: false, hasReviewer: false }))
+      .toEqual({ ok: false, reason: 'not_signed' });
+  });
+
+  it('refuses a report that has already gone out', () => {
+    // `not_signed` would be the lazy answer and it would be a lie: the report is signed,
+    // it is delivered, and an operator reading "not signed" would go looking for a reader.
+    expect(deliverDecision({ state: 'delivered', requiresReviewer: true, hasReviewer: true }))
+      .toEqual({ ok: false, reason: 'already_delivered' });
+  });
+
+  it('enforces the second name at the door the patient data leaves through', () => {
+    // A signed report on a sub-specialty that requires review cannot reach the clinic until
+    // a reviewer is named. The reader who signed it is not blocked — they sign and go home.
+    expect(deliverDecision({ state: 'signed', requiresReviewer: true, hasReviewer: false }))
+      .toEqual({ ok: false, reason: 'review_required' });
+    expect(deliverDecision({ state: 'signed', requiresReviewer: true, hasReviewer: true })).toEqual({ ok: true });
+    expect(deliverDecision({ state: 'verified', requiresReviewer: true, hasReviewer: true })).toEqual({ ok: true });
+  });
+
+  it('lets a sub-specialty that does not require review deliver on one signature', () => {
+    expect(deliverDecision({ state: 'signed', requiresReviewer: false, hasReviewer: false })).toEqual({ ok: true });
+  });
+});
+
+describe('needsSecondName', () => {
+  it('names the gap only for a report that is waiting on it', () => {
+    const waiting = { state: 'signed' as ReportState, requiresReviewer: true, hasReviewer: false };
+    expect(needsSecondName(waiting)).toBe(true);
+    expect(needsSecondName({ ...waiting, hasReviewer: true })).toBe(false);
+    expect(needsSecondName({ ...waiting, requiresReviewer: false })).toBe(false);
+    expect(needsSecondName({ ...waiting, state: 'verified' })).toBe(false);
+    // An amended row is history, not a live gap: the current answer is a different row.
+    expect(needsSecondName({ ...waiting, state: 'amended' })).toBe(false);
+  });
+});
+
+describe('deliveryIdempotencyKey', () => {
+  it('keys on the version, so an amendment is never swallowed', () => {
+    const a = deliveryIdempotencyKey({ reportId: 9, version: 1, channel: 'portal' });
+    const b = deliveryIdempotencyKey({ reportId: 9, version: 2, channel: 'portal' });
+    expect(a).toBe('report:9:v1:portal');
+    expect(a).not.toBe(b);
+    expect(deliveryIdempotencyKey({ reportId: 9, version: 1, channel: 'email' })).not.toBe(a);
   });
 });

@@ -44,8 +44,8 @@ viewer lives in this repo.
 | --- | --- | --- |
 | Ingest edge | center's modality or uploader | Orthanc C-STORE, watched folders, browser upload |
 | Worklist | radiologist | offers with a padlock, accept or decline-with-a-reason, lapse countdown; open the case you hold and window it — no auto-next yet |
-| Report desk | radiologist, reviewer | draft → sign → countersign, and amend as a new version that supersedes. Built and proven on test data. **Delivery is not**: no PDF, no `delivered`, no message to the center |
-| Console | owner, center admin | who is routable, what is running out and who holds it, what cannot be routed and why, manual assign, and the same viewer for a case inside their own scope; tenants, tariffs, rosters, QC, invoices, payouts are still to come |
+| Report desk | radiologist, reviewer | draft → sign → countersign → **deliver**: the signed report renders to a PDF whose SHA-256 is recorded, downloads as `telrad-<accession>-v<n>.pdf`, and moves the report to `delivered`. An amendment supersedes the version instead of editing it. Built and proven on test data. What is still missing is the message: a clinic with no login hears nothing |
+| Console | owner, center desk, center admin | who is routable, what is running out and who holds it, what cannot be routed and why, manual assign, what is signed and not yet released with the reason, and the same viewer for a case inside their own scope; tariffs, rosters, QC, invoices and payouts are still to come |
 
 ## Layout
 

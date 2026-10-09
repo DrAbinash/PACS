@@ -158,11 +158,7 @@ export default function Viewer({ studyId, onBack, onChanged }: {
       <main>
         {error && <div className="banner">{error}</div>}
         {descriptor?.reportAccess && (
-          <div className="notebar">
-            {descriptor.reportAccess.as === 'review'
-              ? `You are not holding this case. It opened because version ${descriptor.reportAccess.version} of its report is waiting for a second name, and nobody should sign what they cannot see.`
-              : `You are reading this back as the author of version ${descriptor.reportAccess.version}. The case left your desk when you signed it, so the panel no longer lists it.`}
-          </div>
+          <div className="notebar">{openNote(descriptor.reportAccess)}</div>
         )}
 
         <div className="reading">
@@ -246,6 +242,19 @@ export default function Viewer({ studyId, onBack, onChanged }: {
       </main>
     </>
   );
+}
+
+// Why the images opened for somebody who is not holding the case. Three different
+// permissions, and a reader who is not told which one they are using cannot tell a review
+// from a read-back from an operator's look.
+function openNote(access: NonNullable<ViewDescriptor['reportAccess']>): string {
+  if (access.as === 'review') {
+    return `You are not holding this case. It opened because version ${access.version} of its report is waiting for a second name, and nobody should sign what they cannot see.`;
+  }
+  if (access.as === 'author') {
+    return `You are reading this back as the author of version ${access.version}. The case left your desk when you signed it, so the panel no longer lists it.`;
+  }
+  return `You are opening this as the desk, not as a reader. Version ${access.version} of its report is ${access.state}.`;
 }
 
 function describe(err: ApiError): string {

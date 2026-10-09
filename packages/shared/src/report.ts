@@ -23,18 +23,22 @@ export type ReportSection = (typeof REPORT_SECTIONS)[number];
 // kinder one.
 export const REQUIRED_SECTIONS: readonly ReportSection[] = ['findings', 'impression'];
 
-export type ReportAction = 'edit' | 'sign' | 'countersign' | 'amend' | 'withdraw';
+export type ReportAction = 'edit' | 'sign' | 'countersign' | 'amend' | 'withdraw' | 'deliver';
 
 // A signed report is immutable, and `amend` is the only way to change what a reader
 // thinks: the previous row keeps both its names and its timestamps, and a new version
 // supersedes it. `withdraw` exists for an abandoned draft so it can be closed without
 // deleting it — a row that never existed answers no audit question.
+// `deliver` is the act of releasing the document to the referring clinic. It is a verb
+// with its own state rather than a flag, because "the report exists" and "the clinic has
+// it" are two facts that a center will be asked to distinguish under the DPDP clock.
 const ALLOWED: Record<ReportAction, readonly ReportState[]> = {
   edit: ['draft'],
   sign: ['draft'],
   countersign: ['signed'],
   amend: ['signed', 'verified', 'delivered'],
   withdraw: ['draft'],
+  deliver: ['signed', 'verified'],
 };
 
 export function stateAllows(action: ReportAction, state: ReportState): boolean {
@@ -114,7 +118,51 @@ export function amendDecision(input: {
   return { ok: true };
 }
 
-export function nextVersion(versions: number[]): number {  return versions.length === 0 ? 1 : Math.max(...versions) + 1;
+/**
+ * Delivery is the release of the document to the referring clinic, and it is the one
+ * place `sub_specialties.requires_reviewer` is enforced. That column has been read and
+ * displayed since the report desk was built — the screen says "this sub-specialty
+ * requires a second name" — and a rule that is only ever printed is a hint. The check
+ * belongs here rather than at signing time, because a reader on a night shift must be
+ * able to sign and go; what may not happen is the clinic receiving it before the second
+ * name exists.
+ */
+export function deliverDecision(input: {
+  state: ReportState;
+  requiresReviewer: boolean;
+  hasReviewer: boolean;
+}): Decision {
+  if (input.state === 'delivered') return refused('already_delivered');
+  if (!stateAllows('deliver', input.state)) return refused('not_signed');
+  if (input.requiresReviewer && !input.hasReviewer) return refused('review_required');
+  return { ok: true };
+}
+
+// The same predicate, for the screens that have to *list* the gap rather than refuse an
+// action: a report sitting `signed` with nobody named as a reviewer is invisible on every
+// board this product had until delivery existed, because it is no longer the reader's case
+// and not yet the clinic's answer.
+export function needsSecondName(input: {
+  state: ReportState;
+  requiresReviewer: boolean;
+  hasReviewer: boolean;
+}): boolean {
+  return input.state === 'signed' && input.requiresReviewer && !input.hasReviewer;
+}
+
+// One row per report version per channel. A version is what makes the key unique, not the
+// report id: an amendment is a different document with the same id, and re-using the key
+// would silently swallow its delivery.
+export function deliveryIdempotencyKey(input: {
+  reportId: number;
+  version: number;
+  channel: 'portal' | 'email' | 'whatsapp' | 'hl7' | 'pdf_link';
+}): string {
+  return `report:${input.reportId}:v${input.version}:${input.channel}`;
+}
+
+export function nextVersion(versions: number[]): number {
+  return versions.length === 0 ? 1 : Math.max(...versions) + 1;
 }
 
 export type ReportVersion = { version: number; state: ReportState };

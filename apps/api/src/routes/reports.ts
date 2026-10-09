@@ -1,17 +1,32 @@
 import { and, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import {
-  type Db, appendAudit, assignments, clinicianProfiles, patients, reports, slaClocks,
-  studies, subSpecialties, tenants, users, type Report,
+  type Db, appendAudit, assignments, clinicianProfiles, orders, patients, reports,
+  reportDeliveries, slaClocks, studies, subSpecialties, tenants, users, type Report,
 } from '@telrad/db';
 import {
   REPORT_SECTIONS, type Grade, amendDecision, countersignDecision, currentVersion,
-  mayReadReport, missingSections, nextVersion, signDecision, stateAllows,
+  deliverDecision, deliveryIdempotencyKey, mayReadReport, missingSections, needsSecondName,
+  nextVersion, signDecision, stateAllows,
 } from '@telrad/shared';
 import { Router, type Response } from 'express';
 import { requireAuth, requireRole, scoped, scopeTenant, type Ctx, type Principal } from '../auth.js';
 import { ah } from '../handler.js';
+import { renderReportPdf, reportPdfFilename, type ReportPdfInput } from '../report-pdf.js';
 
 const READER_ROLES = ['radiologist', 'reviewer'];
+// Releasing a report to the referring clinic is a desk act, not a reading act. The reader
+// who signed it has already put their name on the words; whether the document leaves now is
+// the center's operational decision, and keeping it that way means an overdue case cannot
+// be pushed out the door by the one person under time pressure to do it.
+const DESK_ROLES = ['center_staff', 'owner', 'console'];
+// Which states have a document. A draft has none — the screen shows the words, and a PDF of
+// an unsigned report is a thing people forward. A superseded version keeps one, because the
+// question "what did you send us in March" has to be answerable after the amendment.
+const DOWNLOADABLE: readonly string[] = ['signed', 'verified', 'delivered', 'amended'];
+// The two states delivery accepts, and the conditional the update is guarded by — a
+// concurrent release from a second desk tab loses here rather than writing a second audit
+// row for a document that went out once.
+const DELIVER_STATES: ('signed' | 'verified')[] = ['signed', 'verified'];
 // A report body is not a novel. The cap exists because this text goes into a jsonb column
 // that a center will one day render as a PDF, and an unbounded field is how one pasted
 // dictionary ends up copied into every version of a patient's report.
@@ -29,11 +44,17 @@ type ReportView = Report & {
   subSpecialty: string | null;
   priority: string | null;
   studyDate: string | null;
+  receivedAt: Date | null;
   tenantCode: string | null;
+  centreName: string | null;
   requiresReviewer: boolean;
+  referringName: string | null;
+  referringRegistration: string | null;
+  referringPhone: string | null;
   patientName: string | null;
   patientMrn: string | null;
   patientDob: Date | null;
+  patientAge: string | null;
   patientGender: string | null;
 };
 
@@ -68,16 +89,23 @@ export function reportsRouter(db: Db): Router {
       subSpecialty: studies.subSpecialtyCode,
       priority: studies.priority,
       studyDate: studies.studyDate,
+      receivedAt: studies.receivedAt,
       requiresReviewer: subSpecialties.requiresReviewer,
       tenantCode: tenants.code,
+      centreName: tenants.legalName,
+      referringName: orders.referringName,
+      referringRegistration: orders.referringRegistration,
+      referringPhone: orders.referringPhone,
       patientName: patients.fullName,
       patientMrn: patients.mrn,
       patientDob: patients.dob,
+      patientAge: patients.ageText,
       patientGender: patients.gender,
     }).from(reports)
       .innerJoin(studies, eq(studies.id, reports.studyId))
       .leftJoin(tenants, eq(tenants.id, reports.tenantId))
       .leftJoin(patients, eq(patients.id, studies.patientId))
+      .leftJoin(orders, eq(orders.id, studies.orderId))
       .leftJoin(subSpecialties, eq(subSpecialties.code, studies.subSpecialtyCode))
       .where(eq(reports.id, id))
       .limit(1);
@@ -89,11 +117,17 @@ export function reportsRouter(db: Db): Router {
       subSpecialty: row.subSpecialty,
       priority: row.priority,
       studyDate: row.studyDate,
+      receivedAt: row.receivedAt,
       tenantCode: row.tenantCode,
+      centreName: row.centreName,
       requiresReviewer: row.requiresReviewer ?? false,
+      referringName: row.referringName,
+      referringRegistration: row.referringRegistration,
+      referringPhone: row.referringPhone,
       patientName: row.patientName,
       patientMrn: row.patientMrn,
       patientDob: row.patientDob,
+      patientAge: row.patientAge,
       patientGender: row.patientGender,
     };
   }
@@ -130,11 +164,26 @@ export function reportsRouter(db: Db): Router {
       id: reports.id,
       version: reports.version,
       state: reports.state,
+      // Read out with the history because the chain only points backwards: v2 knows it
+      // supersedes v1, and v1 has no column that names v2. Anything that has to say
+      // "this version was replaced by v2" — the screen's history list and the banner on a
+      // superseded PDF — answers from this column rather than from a second query.
+      supersedesReportId: reports.supersedesReportId,
       authorName: reports.authorName,
       signedAt: reports.signedAt,
       verifiedAt: reports.verifiedAt,
     }).from(reports).where(eq(reports.studyId, studyId)).orderBy(desc(reports.version));
   }
+
+  const versionOf = (
+    history: Awaited<ReturnType<typeof versionsOf>>, reportId: number | null,
+  ): number | null =>
+    reportId === null ? null : history.find((h) => h.id === reportId)?.version ?? null;
+
+  const supersededByOf = (
+    history: Awaited<ReturnType<typeof versionsOf>>, reportId: number,
+  ): number | null =>
+    history.find((h) => h.supersedesReportId === reportId)?.version ?? null;
 
   /** The one version a study should be answered with, or null when all are history. */
   async function liveOf(studyId: number): Promise<ReportView | null> {
@@ -147,10 +196,15 @@ export function reportsRouter(db: Db): Router {
   function describeReport(
     row: ReportView,
     history: Awaited<ReturnType<typeof versionsOf>>,
-    me: { userId: number; grade: Grade | null } | null,
+    me: { userId: number; role: string; grade: Grade | null } | null,
     authorGrade: Grade | null,
   ) {
     const mine = me !== null && row.authorUserId === me.userId;
+    const deliverable = deliverDecision({
+      state: row.state,
+      requiresReviewer: row.requiresReviewer,
+      hasReviewer: row.reviewerUserId !== null,
+    });
     return {
       id: row.id,
       studyId: row.studyId,
@@ -168,8 +222,10 @@ export function reportsRouter(db: Db): Router {
       // The version number rather than the row id, because it is the version a reader
       // reads in the sentence "correction to v1". Derived from the history the same
       // response carries, so it cannot drift from what is on screen.
-      supersedesVersion: row.supersedesReportId === null ? null
-        : (history.find((h) => h.id === row.supersedesReportId)?.version ?? null),
+      supersedesVersion: versionOf(history, row.supersedesReportId),
+      // The other direction, which no column on this row stores: v1 is superseded by
+      // whichever later row names it. The banner on a superseded PDF is printed from this.
+      supersededByVersion: supersededByOf(history, row.id),
       amendmentReason: row.amendmentReason,
       createdAt: row.createdAt,
       gaps: missingSections(row.sections),
@@ -196,6 +252,22 @@ export function reportsRouter(db: Db): Router {
           authorGrade,
           amenderGrade: me?.grade ?? null,
         }).ok,
+        // Desk roles only, and the reason is carried beside it so the screen can say why a
+        // row it can see is a row it cannot release.
+        deliver: deliverable.ok && me !== null && DESK_ROLES.includes(me.role),
+        // Whether this caller should be shown the delivery panel at all, as distinct from
+        // whether the row may be released: a blocked desk row says why it is blocked, and a
+        // reader who has no part in releasing it sees nothing.
+        showDelivery: me !== null && DESK_ROLES.includes(me.role),
+        // Any role that may read the report may take the document: the clinic's own doctor
+        // asking "what did you send us" is answered by the same bytes.
+        download: DOWNLOADABLE.includes(row.state),
+      },
+      delivery: {
+        channel: 'portal' as const,
+        recipient: row.referringName ?? 'referring clinician not recorded',
+        decision: deliverable.ok ? null : deliverable.reason,
+        pdfSha256: row.pdfSha256,
       },
       history,
       study: {
@@ -205,9 +277,77 @@ export function reportsRouter(db: Db): Router {
         priority: row.priority,
         studyDate: row.studyDate,
         tenantCode: row.tenantCode,
+        centreName: row.centreName,
         requiresReviewer: row.requiresReviewer,
+        needsSecondName: needsSecondName({
+          state: row.state,
+          requiresReviewer: row.requiresReviewer,
+          hasReviewer: row.reviewerUserId !== null,
+        }),
       },
-      patient: { name: row.patientName, mrn: row.patientMrn, dob: row.patientDob, gender: row.patientGender },
+      patient: {
+        name: row.patientName, mrn: row.patientMrn, dob: row.patientDob,
+        age: row.patientAge, gender: row.patientGender,
+      },
+    };
+  }
+
+  // The document prints UTC and says so. A center in Kolkata and a reader in Dubai are
+  // looking at the same signature line, and a bare `03:10` between them is a dispute.
+  const utc = (value: Date | null): string | null =>
+    value === null ? null : `${value.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+
+  // `dob` is a timestamp without a zone, so postgres.js hands back a Date carrying the
+  // wall time that was stored. Reading it with the local getters prints the birthday the
+  // desk typed; `toISOString()` would shift a midnight-of-the-1st to the previous day.
+  const dateOnly = (value: Date | null): string | null => value === null ? null
+    : `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
+
+  const dicomDate = (value: string | null): string | null =>
+    value === null ? null : /^(\d{4})(\d{2})(\d{2})$/.exec(value)?.slice(1).join('-') ?? value;
+
+  function pdfInputOf(
+    row: ReportView,
+    extra: {
+      supersedesVersion: number | null;
+      supersededByVersion: number | null;
+      criticals?: { code: string; label: string }[];
+    },
+  ): ReportPdfInput {
+    return {
+      centreName: row.centreName ?? row.tenantCode ?? 'Radiology centre',
+      tenantCode: row.tenantCode ?? '—',
+      accession: row.accession ?? `study-${row.studyId}`,
+      modality: row.modality,
+      subSpecialty: row.subSpecialty,
+      priority: row.priority ?? 'routine',
+      studyDate: dicomDate(row.studyDate),
+      receivedAt: utc(row.receivedAt),
+      patient: {
+        name: row.patientName ?? 'Patient not linked',
+        mrn: row.patientMrn ?? '—',
+        sex: row.patientGender ?? 'U',
+        age: row.patientAge,
+        dob: dateOnly(row.patientDob),
+      },
+      referring: {
+        name: row.referringName,
+        registration: row.referringRegistration,
+        phone: row.referringPhone,
+      },
+      version: row.version,
+      state: row.state,
+      requiresReviewer: row.requiresReviewer,
+      supersedesVersion: extra.supersedesVersion,
+      supersededByVersion: extra.supersededByVersion,
+      amendmentReason: row.amendmentReason,
+      sections: row.sections,
+      author: { name: row.authorName, registration: row.authorRegistration },
+      reviewer: row.reviewerUserId === null ? null
+        : { name: row.reviewerName ?? 'unnamed', registration: row.reviewerRegistration ?? '—' },
+      signedAt: utc(row.signedAt),
+      verifiedAt: utc(row.verifiedAt),
+      criticals: extra.criticals ?? [],
     };
   }
 
@@ -217,8 +357,11 @@ export function reportsRouter(db: Db): Router {
     const [me, author] = await Promise.all([profileOf(p.userId), profileOf(row.authorUserId)]);
     return res.status(status).json({
       ok: true,
+      // The grade comes from the clinician profile and may legitimately be missing (a desk
+      // account has none); the role comes from the session and always exists. They are not
+      // the same lookup, and conflating them would grey out a button for the wrong reason.
       report: describeReport(row, await versionsOf(row.studyId),
-        me ? { userId: p.userId, grade: me.grade } : { userId: p.userId, grade: null },
+        { userId: p.userId, role: p.role, grade: me?.grade ?? null },
         author?.grade ?? null),
     });
   }
@@ -330,6 +473,79 @@ export function reportsRouter(db: Db): Router {
     return respond(res, p, row.id);
   }));
 
+  // Declared before '/reports/:id' with the other word-prefixed paths. This is the desk's
+  // list: everything that carries a signature and has not yet gone to the clinic, with the
+  // reason any row on it cannot go.
+  r.get('/reports/awaiting-delivery', ah(async (req: Ctx, res) => {
+    if (!requireRole(req.principal, DESK_ROLES, res)) return undefined;
+    const p = req.principal!;
+    const scope = scopeTenant(p);
+
+    const rows = await db.select({
+      reportId: reports.id,
+      studyId: reports.studyId,
+      version: reports.version,
+      state: reports.state,
+      signedAt: reports.signedAt,
+      verifiedAt: reports.verifiedAt,
+      // The id rather than a boolean: the same value answers "is there a second name" and
+      // is the only thing a reader can check the row against on screen.
+      reviewerUserId: reports.reviewerUserId,
+      accession: studies.accessionNumber,
+      modality: studies.modalityCode,
+      subSpecialty: studies.subSpecialtyCode,
+      priority: studies.priority,
+      requiresReviewer: subSpecialties.requiresReviewer,
+      patientName: patients.fullName,
+      patientMrn: patients.mrn,
+      referringName: orders.referringName,
+      tenantCode: tenants.code,
+    }).from(reports)
+      .innerJoin(studies, eq(studies.id, reports.studyId))
+      .leftJoin(orders, eq(orders.id, studies.orderId))
+      .leftJoin(patients, eq(patients.id, studies.patientId))
+      .leftJoin(subSpecialties, eq(subSpecialties.code, studies.subSpecialtyCode))
+      .leftJoin(tenants, eq(tenants.id, reports.tenantId))
+      .where(and(
+        scope === null ? sql`true` : eq(reports.tenantId, scope),
+        inArray(reports.state, DELIVER_STATES),
+      ))
+      .orderBy(reports.signedAt);
+
+    // Per row, because the answer depends on the row's own sub-specialty: a signed MRI that
+    // is waiting on a second name and a signed chest film that never needed one are both
+    // "not delivered", and only one of them is a gap someone has to chase.
+    const out = rows.map((row) => {
+      const decision = deliverDecision({
+        state: row.state,
+        requiresReviewer: row.requiresReviewer ?? false,
+        hasReviewer: row.reviewerUserId !== null,
+      });
+      return {
+        ...row,
+        deliverable: decision.ok,
+        reason: decision.ok ? null : decision.reason,
+        needsSecondName: needsSecondName({
+          state: row.state,
+          requiresReviewer: row.requiresReviewer ?? false,
+          hasReviewer: row.reviewerUserId !== null,
+        }),
+      };
+    });
+
+    await appendAudit(db, {
+      actorUserId: p.userId, actorKind: 'human', tenantId: p.tenantId,
+      action: 'report.delivery_queue', entity: 'reports',
+      detail: { count: out.length, blocked: out.filter((o) => !o.deliverable).length },
+    });
+    res.json({
+      ok: true,
+      generatedAt: new Date(),
+      counts: { total: out.length, ready: out.filter((o) => o.deliverable).length },
+      awaiting: out,
+    });
+  }));
+
   r.get('/reports/:id', ah(async (req: Ctx, res) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ ok: false, error: 'bad_id' });
@@ -345,6 +561,117 @@ export function reportsRouter(db: Db): Router {
       detail: { studyId: row.studyId, version: row.version, state: row.state },
     });
     return respond(res, p, id);
+  }));
+
+  r.post('/reports/:id/deliver', ah(async (req: Ctx, res) => {
+    if (!requireRole(req.principal, DESK_ROLES, res)) return undefined;
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ ok: false, error: 'bad_id' });
+    const p = req.principal!;
+    const row = await loadReport(id);
+    if (!row) return res.status(404).json({ ok: false, error: 'not_found' });
+    const scope = scopeTenant(p);
+    if (scope !== null && row.tenantId !== scope) return await denied(res, p, String(id), true);
+
+    const decision = deliverDecision({
+      state: row.state,
+      requiresReviewer: row.requiresReviewer,
+      hasReviewer: row.reviewerUserId !== null,
+    });
+    if (!decision.ok) return res.status(422).json({ ok: false, error: decision.reason });
+
+    // Rendered first, and only then recorded. A delivery that flipped the state and then
+    // failed to produce a document would leave a report marked as sent with nothing behind
+    // it — which is the worst of the orderings, because the clinic is told and the bytes
+    // do not exist.
+    const history = await versionsOf(row.studyId);
+    const rendered = await renderReportPdf(pdfInputOf(row, {
+      supersedesVersion: versionOf(history, row.supersedesReportId),
+      supersededByVersion: supersededByOf(history, row.id),
+    }));
+
+    const now = new Date();
+    const [delivered] = await db.update(reports)
+      .set({ state: 'delivered', deliveredAt: now, pdfSha256: rendered.sha256 })
+      .where(and(eq(reports.id, id), inArray(reports.state, DELIVER_STATES)))
+      .returning({ id: reports.id });
+    if (!delivered) return res.status(409).json({ ok: false, error: 'not_deliverable' });
+
+    await db.update(slaClocks).set({ deliveredAt: now })
+      .where(and(eq(slaClocks.studyId, row.studyId), isNull(slaClocks.deliveredAt)));
+
+    await db.insert(reportDeliveries).values({
+      reportId: id,
+      tenantId: row.tenantId,
+      channel: 'portal',
+      recipient: row.referringName ?? 'the referring clinic',
+      status: 'sent',
+      attemptNo: 1,
+      sentAt: now,
+      idempotencyKey: deliveryIdempotencyKey({ reportId: id, version: row.version, channel: 'portal' }),
+    }).onConflictDoNothing({ target: reportDeliveries.idempotencyKey });
+
+    await appendAudit(db, {
+      actorUserId: p.userId, actorKind: 'human', tenantId: row.tenantId,
+      action: 'report.delivered', entity: 'reports', entityId: String(id),
+      detail: {
+        studyId: row.studyId,
+        version: row.version,
+        channel: 'portal',
+        recipient: { name: row.referringName, registration: row.referringRegistration },
+        // The hash of the document that left, stored on the report row as well: the answer
+        // to "is this the PDF you were sent" has to be one read away, not a re-render away.
+        pdfSha256: rendered.sha256,
+        pdfBytes: rendered.bytes.length,
+        pdfPages: rendered.pages,
+        requiredSecondName: row.requiresReviewer,
+      },
+    });
+    return respond(res, p, id);
+  }));
+
+  r.get('/reports/:id/pdf', ah(async (req: Ctx, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ ok: false, error: 'bad_id' });
+    const p = req.principal!;
+    const row = await loadReport(id);
+    if (!row) return res.status(404).json({ ok: false, error: 'not_found' });
+    const scope = scopeTenant(p);
+    if (scope !== null && row.tenantId !== scope) return await denied(res, p, String(id), true);
+    if (!mayRead(row, p)) return await denied(res, p, String(id), false);
+    if (!DOWNLOADABLE.includes(row.state)) return res.status(409).json({ ok: false, error: 'not_signed' });
+
+    const history = await versionsOf(row.studyId);
+    const rendered = await renderReportPdf(pdfInputOf(row, {
+      supersedesVersion: versionOf(history, row.supersedesReportId),
+      supersededByVersion: supersededByOf(history, row.id),
+    }));
+
+    await appendAudit(db, {
+      actorUserId: p.userId, actorKind: 'human', tenantId: row.tenantId,
+      action: 'report.pdf_downloaded', entity: 'reports', entityId: String(id),
+      detail: {
+        studyId: row.studyId,
+        version: row.version,
+        state: row.state,
+        bytes: rendered.bytes.length,
+        pages: rendered.pages,
+        sha256: rendered.sha256,
+        // Compared, not assumed. If the rendering ever changes under a report that was
+        // already delivered, the audit row says so and the operator sees a mismatch rather
+        // than a document nobody can vouch for.
+        recordSha256: row.pdfSha256,
+        matchesRecord: row.pdfSha256 === null ? null : row.pdfSha256 === rendered.sha256,
+      },
+    });
+
+    // Patient data, on demand, so nothing about it is cacheable — and named for the
+    // accession rather than the patient, because a reception machine keeps what it is given.
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition',
+      `attachment; filename="${reportPdfFilename(row.accession ?? `study-${row.studyId}`, row.version)}"`);
+    res.send(Buffer.from(rendered.bytes));
   }));
 
   r.post('/reports', ah(async (req: Ctx, res) => {
