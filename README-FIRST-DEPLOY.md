@@ -200,7 +200,35 @@ print(json.load(urllib.request.urlopen(urllib.request.Request(
   headers={'Authorization':'Basic '+b})))"
 ```
 
-## 8. Prove the negative cases before trusting the pipeline
+## 8. Run the console
+
+The board is a static build, and Caddy serves it from `apps/web/dist` on the same
+origin as the api — which is not a style choice. The session cookie is `HttpOnly` and
+`SameSite=Strict`, so a second origin would mean either weakening that or storing a
+token where any browser extension can read it.
+
+```bash
+pnpm --filter @telrad/web build          # writes apps/web/dist
+docker compose --profile nas up -d caddy # serves it at https://<nas>:8443
+```
+
+Build it before starting Caddy. An empty `apps/web/dist` mounts fine and answers 404
+for every page, which looks like a broken deployment rather than a missing build step.
+
+For working on it locally, `pnpm --filter @telrad/web dev` serves the page and proxies
+`/v1` to the api on `127.0.0.1:3101`, so the cookie stays first-party there too.
+
+What has to be true on the board:
+
+- a reader who signs in and leaves the page open shows **green**; close the tab and
+  they must turn **red** within about ninety seconds without anyone touching anything;
+- a reader who presses Pause stays **amber** even while their tab keeps heartbeating —
+  if a refresh can turn somebody available again, the board is not telling the truth;
+- a reader whose open cases equal their `max_queue_size` shows **amber "At
+  capacity"**, which is a different fact from "gone" and is coloured differently;
+- with nobody green, the board says so in a banner rather than showing an empty table.
+
+## 9. Prove the negative cases before trusting the pipeline
 
 ```bash
 pnpm --filter @telrad/worker test   # unknown AE title → orphan, never a tenant's queue
@@ -211,7 +239,7 @@ pnpm --filter @telrad/api test      # refuses to boot on a placeholder secret
 Then re-run the ingest poll a second time and confirm `studies` did not grow: the
 cursor is the only thing standing between a restart and a duplicated worklist.
 
-## 9. Backup before any real study
+## 10. Backup before any real study
 
 Three copies, and the third one off the premises: nightly `pg_dump` of the telrad
 schema, a Btrfs snapshot task on `${TR_RUNTIME}/orthanc`, and a restic copy to a
@@ -222,8 +250,11 @@ this deployment holds test data only.
 
 ## What is not here yet
 
-Console and radiologist worklist UI, the viewer, assignment and escalation,
-report authoring, billing, HL7. The upload *endpoints* exist and are proven; the
-*agent* that a center installs on its modality PC to call them does not, so today
-that channel only works for a browser upload or a script. README at the root lists
-the phase plan; docs/ARCHITECTURE.md states what exists.
+The console's first screen is here — the on-panel board that colours readers green,
+amber and red, and the heartbeat that keeps them that way. The worklist, the viewer,
+assignment and escalation, report authoring, billing and HL7 are not. The upload
+*endpoints* exist and are proven; the *agent* that a center installs on its modality
+PC to call them does not, so today that channel only works for a browser upload or a
+script. README at the root lists the phase plan; docs/ARCHITECTURE.md states what
+exists, including what the panel does not yet do: **nothing consumes the green answer
+until the dispatcher is built.**

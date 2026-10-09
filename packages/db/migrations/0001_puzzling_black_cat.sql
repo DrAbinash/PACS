@@ -1,0 +1,1 @@
+ALTER TABLE "telrad"."reader_availability" ADD COLUMN "last_seen_at" timestamp with time zone;

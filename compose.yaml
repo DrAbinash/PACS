@@ -162,6 +162,9 @@ services:
       - caddyfile
     volumes:
       - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # The console is a static build, so Caddy serves it directly rather than the
+      # deployment gaining a fourth long-running node to keep alive.
+      - ./apps/web/dist:/srv:ro
       - ${TR_RUNTIME}/caddy/data:/data
       - ${TR_RUNTIME}/caddy/config:/config
     ports:

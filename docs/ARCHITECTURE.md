@@ -54,6 +54,13 @@ the only place a path appears.
   short value; there is no "warn and continue".
 - `apps/api` is the only writer of clinical state. The worker writes ingest rows
   and nothing else; the future console reads.
+- **Green means "will pick this up now", never "has an account".** Presence is a
+  heartbeat the open console tab sends every twenty seconds, the state the reader
+  declared, and whether their queue has a free slot — all three, computed by one pure
+  function (`packages/shared/src/presence.ts`) that the board and the future
+  dispatcher both call, so they cannot disagree about who is routable. A tab left open
+  overnight goes red on its own. Amber is deliberately separate from red: a reader at
+  capacity and a reader who has gone home are different things to phone about at 2 a.m.
 - Clocks open only for a study that is both linked and complete. A deadline on a
   guessed sub-category measures the wrong thing. The clock opens on the poll that
   *finds* it complete, not the poll that inserted the row, and is measured from the
@@ -67,6 +74,26 @@ the only place a path appears.
   strictly higher grade; the old row keeps its signature pair.
 
 ## Known open items, stated rather than implied
+
+- **One failed query takes the whole api down.** Express 4 does not catch a rejected
+  promise from an `async` handler, so a database error inside any route becomes an
+  unhandled rejection and Node exits the process. This was measured, not theorised: a
+  `Date` passed through a raw `sql` template made postgres.js throw while encoding the
+  parameter, and the api died on the first panel read. `restart: unless-stopped` hides
+  it as a two-second blip and the in-flight requests of every connected reader fail
+  with it. The fix is a `ah()` wrapper that forwards rejections to `next(err)` at
+  every route registration — mechanical, ~25 call sites, deliberately not done in a
+  hurry. Until it is, `/health/ready` plus a restart count is the only evidence.
+- **A router mounted at `/v1` guards paths it does not own.** `r.use(requireAuth)`
+  inside such a router runs for *every* `/v1/...` request, so a radiologist polling
+  `/v1/presence` was answered 403 by the sites router's owner-only check, and an agent
+  token polling `/v1/uploads` was answered 401 by a session guard. Both are fixed by
+  `scoped()` in `apps/api/src/auth.ts`, which applies a guard only to the path prefixes
+  that router declares. Mount order is no longer load-bearing, but a new router must
+  still list its own prefixes — forgetting that reintroduces the bug silently.
+- **An unknown `/v1/...` path answers with Express's HTML 404, not JSON.** Harmless
+  today — the console shows "feed lost" — but every other failure mode in this API
+  speaks JSON, and a client should not have to special-case one.
 
 - **A study that arrives on the upload channel is attributed by an Orthanc label, and
   Orthanc's label rules are load-bearing.** The write verb is `PUT
@@ -144,7 +171,9 @@ schedule, which is why retention is data and not a constant.
 | `apps/worker` ingest against **live Orthanc 1.13.0** (C-STORE channel) | **Proven in the P0 run**: 2 synthetic CT studies sent by C-STORE, resolved to the tenant by `RemoteAET`, linked by accession, classified `ct-head`, 2 SLA clocks opened, cursor at `since=12`; a second poll created nothing |
 | `infra/orthanc/orthanc.json` | Boots clean on 1.13.0 with authentication enforced (401 unauthenticated, 200 with the credential). `DicomAet` is not honoured — see open items |
 | `compose.yaml`, `infra/caddy/Caddyfile` | `docker compose config` interpolates; **Caddy and the profiles have not been run** |
-| Console UI, viewer, worklist UI, dispatcher, escalation execution, reports, delivery, billing | **Not built.** Absent is not the same as permitted |
+| `apps/web` console — the on-panel board | Built and **seen in a browser**: four seeded readers rendered red with "No signal · last signal 3m ago" after their heartbeats stopped, then Dr Anitha flipped to green "On panel" and sorted to the top **without a page reload** on the five-second refresh. Verified through the DOM (structure, counts, per-row reason); a screenshot was not available from this browser session, so the visual layout has not been reviewed by a human eye |
+| `apps/api` presence endpoints | **Proven live**: `POST /presence/heartbeat` → green; a heartbeat *after* declaring `paused` stays amber, so presence cannot be refreshed back into availability; a reader holding one case with `max_queue_size = 1` → amber `at_cap`; `last_seen_at` backdated five minutes → red `idle` while `reader_availability.state` still reads `receiving`, which is the whole point; no session → 401, a non-reader session → 403 |
+| Console worklist, viewer, assignment and escalation execution, reports, delivery, billing | **Not built.** The board says who is routable; nothing consumes that answer yet |
 
 Nothing in this repository has processed a patient study. The studies it has
 processed were invented by `scripts/validation/send-test-study.py`.

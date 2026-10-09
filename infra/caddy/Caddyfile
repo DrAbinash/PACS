@@ -26,10 +26,23 @@
 		reverse_proxy tr-api:3001
 	}
 
-	handle {
-		# Until the console exists, the root path is served by the api rather than
-		# by a placeholder page.
+	# The console calls /v1 on its own origin, because the session cookie is
+	# SameSite=Strict. Note `handle`, not `handle_path`: the api's routes already
+	# carry /v1, so stripping it here would 404 every call.
+	handle /v1/* {
 		reverse_proxy tr-api:3001
+	}
+
+	handle /health/* {
+		reverse_proxy tr-api:3001
+	}
+
+	handle {
+		# apps/web/dist, bind-mounted read-only. A missing build answers 404 rather
+		# than silently falling back to the api, which is what this line used to do.
+		root * /srv
+		try_files {path} /index.html
+		file_server
 	}
 
 	header {

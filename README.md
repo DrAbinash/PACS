@@ -4,12 +4,13 @@ Multi-center tele-radiology service: diagnostic centers push studies in, cases
 distribute to contracted radiologists reading from anywhere, reports come back
 signed by two names and are billed per center.
 
-**Status: P1 — both delivery channels are proven against live infrastructure.** A
-study can arrive by C-STORE or by an upload batch from a center's agent token, be
-attributed to its tenant, linked to its order, and carry an SLA clock; a study that
-matches nothing waits in the orphan queue where a person can link it. There is still
-no console UI, no viewer, no assignment, no report and no money. Nothing in here has
-received a patient study. The inventory at the end of
+**Status: P1 channels proven, console started.** A study can arrive by C-STORE or by
+an upload batch from a center's agent token, be attributed to its tenant, linked to
+its order, and carry an SLA clock; a study that matches nothing waits in the orphan
+queue where a person can link it. The first console screen exists: the on-panel board
+that shows which readers are routable right now. There is still no worklist, no
+viewer, no assignment, no report and no money. Nothing in here has received a patient
+study. The inventory at the end of
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) is the honest state.
 
 Standalone product. It is not a CARE ERP module, it does not call the FutureKind
@@ -30,6 +31,7 @@ borrowed thing is deployment technique: Orthanc + OHIF + Synology Docker, the wa
 
     apps/api        Express + Drizzle, the only writer of clinical state
     apps/worker     ingest poller, inbox drain, study classifier, SLA clock
+    apps/web        the console: on-panel board now, worklist and reporting later
     packages/db     schema, migrations, connection
     packages/shared domain enums and pure logic, no I/O
     infra/          orthanc config, caddy config

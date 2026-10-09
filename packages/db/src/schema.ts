@@ -204,6 +204,10 @@ export const readerAvailability = telrad.table('reader_availability', {
   userId: integer('user_id').primaryKey().references(() => users.id),
   state: text('state', { enum: ['receiving', 'paused', 'away', 'offline'] }).notNull().default('offline'),
   sinceAt: at('since_at'),
+  // The heartbeat, kept separate from `state` because they answer different
+  // questions: state is what the reader declared, last_seen_at is whether their
+  // browser is still proving it. Green needs both.
+  lastSeenAt: timestamp('last_seen_at', { withTimezone: true, mode: 'date' }),
   note: text('note'),
 });
 

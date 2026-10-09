@@ -1,7 +1,7 @@
 import { sql } from 'drizzle-orm';
 import type { Db } from '@telrad/db';
 import { hashToken } from '@telrad/shared';
-import type { NextFunction, Request, Response } from 'express';
+import type { NextFunction, Request, RequestHandler, Response } from 'express';
 
 export const COOKIE = 'telrad_session';
 
@@ -100,6 +100,19 @@ export function bearerOf(req: Request): string | null {
 // a center role can only ever see its own tenant's rows.
 export function scopeTenant(p: Principal): number | null {
   return p.role === 'owner' || p.role === 'console' ? null : p.tenantId;
+}
+
+// A router mounted at '/v1' runs its `use` guards for every '/v1/...' request, not
+// only for the routes it actually declares. Two real defects came from that: an
+// agent token was refused by a session guard on another router, and a radiologist
+// polling /v1/presence got 403 from the sites router's owner-only check. Reordering
+// mounts hides the problem until the next router; scoping the guard to the paths the
+// router owns removes it.
+export function scoped(prefixes: string[], guard: RequestHandler): RequestHandler {
+  return (req, res, next) => {
+    const owned = prefixes.some((p) => req.path === p || req.path.startsWith(p + '/'));
+    return owned ? guard(req, res, next) : next();
+  };
 }
 
 export function requireRole(p: Principal | undefined, roles: string[], res: Response): boolean {

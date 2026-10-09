@@ -7,6 +7,7 @@ import { appendAudit } from './audit.js';
 import { COOKIE, readCookie, requireAuth, scopeTenant, type Ctx } from './auth.js';
 import { clinicalRouter } from './routes/clinical.js';
 import { orphansRouter } from './routes/orphans.js';
+import { presenceRouter } from './routes/presence.js';
 import { sitesRouter } from './routes/sites.js';
 import { uploadsRouter } from './routes/uploads.js';
 
@@ -225,6 +226,7 @@ export function createApp(deps: AppDeps): Express {
   app.use('/v1', clinicalRouter(db));
   app.use('/v1', sitesRouter(db));
   app.use('/v1', orphansRouter(db));
+  app.use('/v1', presenceRouter(db));
 
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     // Never echo an exception message: it can carry a connection string or a

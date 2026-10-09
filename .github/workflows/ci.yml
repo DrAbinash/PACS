@@ -38,6 +38,10 @@ jobs:
       - run: pnpm typecheck:test
       - run: pnpm lint
       - run: pnpm test
+      # The console is served as a static build by Caddy, so a build failure here is
+      # a deployment failure there; `vite build` is also the only thing that checks
+      # the tsx actually compiles for a browser.
+      - run: pnpm --filter @telrad/web build
       # Generated SQL is part of the product: an uncommitted schema change should
       # fail here rather than at a deployment.
       - run: pnpm db:generate && git diff --exit-code packages/db/migrations

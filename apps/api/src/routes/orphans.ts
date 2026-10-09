@@ -4,7 +4,7 @@ import { assignments, orders, patients, slaClocks, studies, subSpecialties, tena
 import { scoreOrder } from '@telrad/shared';
 import { Router } from 'express';
 import { appendAudit } from '../audit.js';
-import { requireAuth, scopeTenant, type Ctx } from '../auth.js';
+import { requireAuth, scoped, scopeTenant, type Ctx } from '../auth.js';
 
 // DICOM dates are YYYYMMDD strings; the matcher compares those, not Date objects.
 function iso(d: Date): string {
@@ -13,7 +13,7 @@ function iso(d: Date): string {
 
 export function orphansRouter(db: Db): Router {
   const r = Router();
-  r.use(requireAuth(db));
+  r.use(scoped(['/orphans', '/studies'], requireAuth(db)));
 
   // The queue an operator actually needs is not "rows with link_state != linked"
   // but rows plus the candidate the matcher would have chosen, because the fix is

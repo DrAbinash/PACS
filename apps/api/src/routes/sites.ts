@@ -4,15 +4,16 @@ import { apiTokens, tenantSites } from '@telrad/db';
 import { cleanText, hashToken, newToken } from '@telrad/shared';
 import { Router } from 'express';
 import { appendAudit } from '../audit.js';
-import { requireAuth, requireRole, type Ctx } from '../auth.js';
+import { requireAuth, requireRole, scoped, type Ctx } from '../auth.js';
 
 export function sitesRouter(db: Db): Router {
   const r = Router();
-  r.use(requireAuth(db));
+  r.use(scoped(['/sites', '/tokens'], requireAuth(db)));
 
   // Site registration and credential issuing is an operator action. A center must
   // never be able to mint a token that writes into another center's queue.
-  r.use((req: Ctx, res, next) => (requireRole(req.principal, ['owner', 'console'], res) ? next() : undefined));
+  r.use(scoped(['/sites', '/tokens'],
+    (req: Ctx, res, next) => (requireRole(req.principal, ['owner', 'console'], res) ? next() : undefined)));
 
   r.get('/sites', async (req: Ctx, res) => {
     const tenantId = req.query.tenant_id ? Number(req.query.tenant_id) : null;

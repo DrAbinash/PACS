@@ -4,7 +4,7 @@ import { orders, patients, tenantSites } from '@telrad/db';
 import { cleanText, normaliseMrn, validateOrderInput, validatePatientInput } from '@telrad/shared';
 import { Router } from 'express';
 import { appendAudit } from '../audit.js';
-import { requireAuth, scopeTenant, type Ctx } from '../auth.js';
+import { requireAuth, scoped, scopeTenant, type Ctx } from '../auth.js';
 
 // The tenant a write lands in is decided here, once: a center role is pinned to its
 // own tenant, and owner/console must name one explicitly. There is no path where an
@@ -20,7 +20,7 @@ function actorTenant(req: Ctx): number | null {
 
 export function clinicalRouter(db: Db): Router {
   const r = Router();
-  r.use(requireAuth(db));
+  r.use(scoped(['/patients', '/orders'], requireAuth(db)));
 
   r.post('/patients', async (req: Ctx, res) => {
     const tenantId = actorTenant(req);
