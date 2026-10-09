@@ -14,12 +14,13 @@ clock stops reporting rather than corrupting it.
 ```bash
 git clone <your-private-remote> telrad && cd telrad
 pnpm install
-pnpm check          # typecheck + tests + config doctor
-bash scripts/doctor/check-secrets.sh
+pnpm check          # build + typecheck + tests + both doctors
 ```
 
 `pnpm check` must be green before any container starts. It is the only step here
-that needs no infrastructure.
+that needs no infrastructure. It runs `check-secrets.sh` too, which on a fresh
+checkout can only test the repository itself — the `.env` half of that check
+becomes real at step 2.
 
 ## 2. Write the env file
 

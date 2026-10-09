@@ -33,6 +33,10 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # Before typecheck, not after: @telrad/shared and @telrad/db publish their type
+      # declarations from dist, so on a fresh runner the app packages cannot resolve
+      # them until the workspace has been built.
+      - run: pnpm build
       - run: pnpm typecheck
       # vitest transpiles without type-checking, so a test that no longer matches an
       # interface passes CI while telling nobody that the contract moved.

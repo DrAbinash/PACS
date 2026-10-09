@@ -14,7 +14,7 @@
     "bootstrap": "pnpm --filter @telrad/api cli bootstrap",
     "verify-audit": "pnpm --filter @telrad/api cli verify-audit",
     "ingest:once": "pnpm --filter @telrad/worker once",
-    "check": "pnpm typecheck && pnpm typecheck:test && pnpm test && pnpm --filter @telrad/web build && bash scripts/doctor/check-config.sh"
+    "check": "pnpm build && pnpm typecheck && pnpm typecheck:test && pnpm test && bash scripts/doctor/check-secrets.sh && bash scripts/doctor/check-config.sh"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
