@@ -107,6 +107,17 @@ describe('isBreached', () => {
   it('counts a report signed after the deadline as breached', () => {
     expect(isBreached(clock({ signedAt: at(300) }), at(301))).toBe(true);
   });
+
+  // And the converse, which is what a deadline moved after the fact depends on: an answer
+  // that landed inside its window cannot be made late by rewriting the clock underneath it.
+  it('freezes lateness at the signature, so a signed-on-time clock never becomes a breach', () => {
+    expect(isBreached(clock({ signedAt: at(150) }), at(1000))).toBe(false);
+    expect(isBreached(clock({ signedAt: at(240) }), at(1000))).toBe(false);
+  });
+
+  it('keeps an unsigned clock measured against the time it is now', () => {
+    expect(isBreached(clock({ signedAt: null }), at(1_000))).toBe(true);
+  });
 });
 
 describe('widenStage', () => {

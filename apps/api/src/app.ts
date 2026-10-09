@@ -15,6 +15,7 @@ import { COOKIE, readCookie, requireAuth, scopeTenant, type Ctx } from './auth.j
 import { clinicalRouter } from './routes/clinical.js';
 import { orphansRouter } from './routes/orphans.js';
 import { presenceRouter } from './routes/presence.js';
+import { reportsRouter } from './routes/reports.js';
 import { sitesRouter } from './routes/sites.js';
 import { uploadsRouter } from './routes/uploads.js';
 import { viewRouter } from './routes/view.js';
@@ -239,6 +240,7 @@ export function createApp(deps: AppDeps): Express {
   app.use('/v1', presenceRouter(db));
   app.use('/v1', worklistRouter(db));
   app.use('/v1', viewRouter(db, orthanc));
+  app.use('/v1', reportsRouter(db));
 
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     // Never echo an exception message: it can carry a connection string or a

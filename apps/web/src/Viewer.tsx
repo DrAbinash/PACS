@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { applyWindow, defaultWindow } from '@telrad/shared/pixels';
+import ReportPanel from './Report';
 import { api, ApiError, type ViewDescriptor, type ViewInstance } from './api';
 
 type Slice = { pk: string; meta: ViewInstance | null; pixels: Int16Array | Uint16Array | null };
@@ -10,12 +11,19 @@ type Slice = { pk: string; meta: ViewInstance | null; pixels: Int16Array | Uint1
  * open.
  *
  * There is no image toolkit here on purpose. The node in this deployment was measured to
- * ignore every window parameter it is offered (eight windows, one identical PNG), so the
+ * ignore every window parameter it is offered (nine windows, one identical PNG), so the
  * stored values cross as numbers and the window is computed on this side. That is what
  * makes brightness and contrast adjustable at all, and it is also why this is a first
  * viewer rather than a diagnostic one: no measurement tools, no MPR, no pan.
  */
-export default function Viewer({ studyId, onBack }: { studyId: number; onBack: () => void }) {
+export default function Viewer({ studyId, onBack, onChanged }: {
+  studyId: number;
+  onBack: () => void;
+  // The board and the desk both change when a report is signed: the case leaves the
+  // reader's queue, the clock stops, and the panel colour moves. The viewer should not be
+  // the only screen that still thinks the read is in progress.
+  onChanged: () => void;
+}) {
   const [descriptor, setDescriptor] = useState<ViewDescriptor | null>(null);
   const [seriesIndex, setSeriesIndex] = useState(0);
   const [sliceIndex, setSliceIndex] = useState(0);
@@ -126,6 +134,14 @@ export default function Viewer({ studyId, onBack }: { studyId: number; onBack: (
 
   const total = useMemo(() => series.reduce((n, s) => n + s.count, 0), [series]);
 
+  // The report belongs on the screen only for the people who can act on it: the reader
+  // holding the case, the one being asked for a second name, and the author coming back to
+  // what they signed. For a case merely offered it is noise — deciding whether to accept is
+  // what that screen is for.
+  const access = descriptor?.reportAccess ?? null;
+  const showReport = descriptor !== null
+    && ((descriptor.held?.state === 'accepted' || descriptor.held?.state === 'reading') || access !== null);
+
   return (
     <>
       <header className="bar">
@@ -141,80 +157,91 @@ export default function Viewer({ studyId, onBack }: { studyId: number; onBack: (
 
       <main>
         {error && <div className="banner">{error}</div>}
+        {descriptor?.reportAccess && (
+          <div className="notebar">
+            {descriptor.reportAccess.as === 'review'
+              ? `You are not holding this case. It opened because version ${descriptor.reportAccess.version} of its report is waiting for a second name, and nobody should sign what they cannot see.`
+              : `You are reading this back as the author of version ${descriptor.reportAccess.version}. The case left your desk when you signed it, so the panel no longer lists it.`}
+          </div>
+        )}
 
-        <div className="viewer">
-          <div className="series">
-            {series.map((s) => (
-              <button
-                key={s.pk}
-                className={s.index === seriesIndex ? 'primary' : undefined}
-                disabled={s.count === 0}
-                onClick={() => { setSeriesIndex(s.index); setSliceIndex(0); }}
-              >
-                {s.description || s.modality || `series ${s.index + 1}`}
-                <span className="sub"> {s.count}</span>
-              </button>
-            ))}
+        <div className="reading">
+          <div className="viewer">
+            <div className="series">
+              {series.map((s) => (
+                <button
+                  key={s.pk}
+                  className={s.index === seriesIndex ? 'primary' : undefined}
+                  disabled={s.count === 0}
+                  onClick={() => { setSeriesIndex(s.index); setSliceIndex(0); }}
+                >
+                  {s.description || s.modality || `series ${s.index + 1}`}
+                  <span className="sub"> {s.count}</span>
+                </button>
+              ))}
+            </div>
+
+            <div
+              className="screen"
+              onWheel={(e) => { e.preventDefault(); go(sliceIndex + (e.deltaY > 0 ? 1 : -1)); }}
+              onPointerDown={(e) => {
+                if (!level) return;
+                e.currentTarget.setPointerCapture(e.pointerId);
+                drag.current = { x: e.clientX, y: e.clientY, center: level.center, width: level.width };
+              }}
+              onPointerMove={(e) => {
+                const start = drag.current;
+                if (!start) return;
+                // Drag is the interaction a reader already knows: horizontal for contrast,
+                // vertical for brightness, both in the units the study itself used.
+                setLevel({
+                  center: Math.round(start.center - (e.clientY - start.y) / 2),
+                  width: Math.max(1, Math.round(start.width + (e.clientX - start.x) / 2)),
+                });
+              }}
+              onPointerUp={() => { drag.current = null; }}
+              onPointerCancel={() => { drag.current = null; }}
+            >
+              <canvas ref={canvas} />
+              {busy && <div className="overlay">loading</div>}
+              {!slice && !busy && !error && <div className="overlay">no image</div>}
+            </div>
+
+            <div className="controls">
+              <div className="row">
+                <button onClick={() => go(sliceIndex - 1)}>◀</button>
+                <input
+                  type="range" min={0} max={Math.max(0, (current?.count ?? 1) - 1)}
+                  value={sliceIndex} onChange={(e) => setSliceIndex(Number(e.target.value))}
+                />
+                <button onClick={() => go(sliceIndex + 1)}>▶</button>
+                <span className="sub">slice {(current ? sliceIndex : 0) + 1} / {current?.count ?? 0}</span>
+              </div>
+              <div className="row">
+                <label>level
+                  <input type="number" value={level?.center ?? 0}
+                    onChange={(e) => setLevel((l) => ({ center: Number(e.target.value), width: l?.width ?? 1 }))} />
+                </label>
+                <label>window
+                  <input type="number" value={level?.width ?? 1} min={1}
+                    onChange={(e) => setLevel((l) => ({ center: l?.center ?? 0, width: Math.max(1, Number(e.target.value)) }))} />
+                </label>
+                {invert && <span className="state amber">inverted (MONOCHROME1)</span>}
+                <span className="sub">
+                  {slice?.meta?.rows ?? '—'}×{slice?.meta?.columns ?? '—'}
+                  {slice?.meta?.bitsStored ? ` · ${slice.meta.bitsStored}-bit` : ''}
+                  {descriptor?.windowing === 'client' ? ' · windowed here' : ''}
+                </span>
+              </div>
+              <div className="sub">
+                Arrow keys or the wheel change the slice; drag on the image for level and window.
+                No measurement tools, no multiplanar reconstruction — this is the first viewer,
+                not the diagnostic one.
+              </div>
+            </div>
           </div>
 
-          <div
-            className="screen"
-            onWheel={(e) => { e.preventDefault(); go(sliceIndex + (e.deltaY > 0 ? 1 : -1)); }}
-            onPointerDown={(e) => {
-              if (!level) return;
-              e.currentTarget.setPointerCapture(e.pointerId);
-              drag.current = { x: e.clientX, y: e.clientY, center: level.center, width: level.width };
-            }}
-            onPointerMove={(e) => {
-              const start = drag.current;
-              if (!start) return;
-              // Drag is the interaction a reader already knows: horizontal for contrast,
-              // vertical for brightness, both in the units the study itself used.
-              setLevel({
-                center: Math.round(start.center - (e.clientY - start.y) / 2),
-                width: Math.max(1, Math.round(start.width + (e.clientX - start.x) / 2)),
-              });
-            }}
-            onPointerUp={() => { drag.current = null; }}
-            onPointerCancel={() => { drag.current = null; }}
-          >
-            <canvas ref={canvas} />
-            {busy && <div className="overlay">loading</div>}
-            {!slice && !busy && !error && <div className="overlay">no image</div>}
-          </div>
-
-          <div className="controls">
-            <div className="row">
-              <button onClick={() => go(sliceIndex - 1)}>◀</button>
-              <input
-                type="range" min={0} max={Math.max(0, (current?.count ?? 1) - 1)}
-                value={sliceIndex} onChange={(e) => setSliceIndex(Number(e.target.value))}
-              />
-              <button onClick={() => go(sliceIndex + 1)}>▶</button>
-              <span className="sub">slice {(current ? sliceIndex : 0) + 1} / {current?.count ?? 0}</span>
-            </div>
-            <div className="row">
-              <label>level
-                <input type="number" value={level?.center ?? 0}
-                  onChange={(e) => setLevel((l) => ({ center: Number(e.target.value), width: l?.width ?? 1 }))} />
-              </label>
-              <label>window
-                <input type="number" value={level?.width ?? 1} min={1}
-                  onChange={(e) => setLevel((l) => ({ center: l?.center ?? 0, width: Math.max(1, Number(e.target.value)) }))} />
-              </label>
-              {invert && <span className="state amber">inverted (MONOCHROME1)</span>}
-              <span className="sub">
-                {slice?.meta?.rows ?? '—'}×{slice?.meta?.columns ?? '—'}
-                {slice?.meta?.bitsStored ? ` · ${slice.meta.bitsStored}-bit` : ''}
-                {descriptor?.windowing === 'client' ? ' · windowed here' : ''}
-              </span>
-            </div>
-            <div className="sub">
-              Arrow keys or the wheel change the slice; drag on the image for level and window.
-              No measurement tools, no multiplanar reconstruction — this is the first viewer,
-              not the diagnostic one.
-            </div>
-          </div>
+          {showReport && <ReportPanel studyId={studyId} onChanged={onChanged} />}
         </div>
       </main>
     </>

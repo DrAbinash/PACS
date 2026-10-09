@@ -4,6 +4,7 @@ export * from './match.js';
 export * from './presence.js';
 export * from './dispatch.js';
 export * from './escalation.js';
+export * from './report.js';
 export * from './pixels.js';
 export * from './audit.js';
 export * from './validate.js';

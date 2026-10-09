@@ -7,11 +7,14 @@ import {
   type Panel,
   type PanelRow,
   type PresenceColor,
+  type MyReportItem,
+  type ReviewItem,
   type Session,
   type WorkCase,
 } from './api';
 
 import Viewer from './Viewer';
+import { explainCode } from './Report';
 
 const HEARTBEAT_MS = 20_000;
 const REFRESH_MS = 5_000;
@@ -133,6 +136,9 @@ function Worklist({ onChanged, onOpen }: { onChanged: () => void; onOpen: (study
                 {c.state === 'offered'
                   ? `offer lapses in ${remaining ?? '0:00'}${c.attemptNo > 1 ? ` · attempt ${c.attemptNo}` : ''}`
                   : `held since ${c.acceptedAt ? new Date(c.acceptedAt).toLocaleTimeString() : '—'}`}
+                {/* A case with a half-written report on it is a different kind of work than
+                    one with nothing yet, and the desk has to say which it is looking at. */}
+                {c.report && <> · <span className="chip">report {c.report.state} v{c.report.version}</span></>}
               </div>
             </div>
             {c.state === 'offered' && declining !== c.assignmentId && (
@@ -157,6 +163,111 @@ function Worklist({ onChanged, onOpen }: { onChanged: () => void; onOpen: (study
           </div>
         );
       })}
+    </div>
+  );
+}
+
+// Two names on a report is the rule; a queue is the feature. A reviewer is by definition
+// not the reader holding the case — routing keeps exactly one live lock per study — so
+// without this list the countersignature would depend on somebody sending a report id in
+// a message. Each row says plainly whether the viewer can clear it and why not.
+function ReviewQueue({ show, onOpen }: { show: boolean; onOpen: (studyId: number) => void }) {
+  const [items, setItems] = useState<ReviewItem[]>([]);
+  const [myGrade, setMyGrade] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const feed = await api.awaitingReview();
+      setItems(feed.awaiting);
+      setMyGrade(feed.myGrade);
+      setError(null);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) return;
+      setError(err instanceof ApiError ? err.code ?? `${err.status}` : 'cannot reach the server');
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!show) return;
+    void load();
+    const timer = setInterval(() => void load(), REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [show, load]);
+
+  if (!show || (items.length === 0 && !error)) return null;
+
+  return (
+    <div className="card">
+      <h2>
+        Awaiting a second name
+        <span className="sub"> · your grade: {myGrade ?? 'not recorded'}</span>
+      </h2>
+      {error && <div className="error">{error}</div>}
+      {items.length === 0 && <div className="sub">Nothing signed is waiting.</div>}
+      {items.map((i) => (
+        <div className="workcase" key={i.reportId}>
+          <div className="who">
+            <strong>{i.accession ?? `study ${i.studyId}`}</strong>
+            <div className="sub">
+              {i.modality ?? '?'} · v{i.version} · signed {i.signedAt ? new Date(i.signedAt).toLocaleTimeString() : '—'}
+            </div>
+            <div className="sub">author {i.authorName}{i.authorGrade ? ` (${i.authorGrade})` : ' — no grade recorded'}</div>
+          </div>
+          <span className="acts">
+            <button className={i.mayClear ? 'primary' : undefined} onClick={() => onOpen(i.studyId)}>Review</button>
+            {!i.mayClear && <span className="state amber">{explainCode(i.reason ?? '')}</span>}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// A reader's own signatures, because signing completes the read and takes the case off the
+// desk that led to it. Without this the console would show tonight's work and hide what was
+// already said, and a reader who wants to check their own report would have no link to
+// follow.
+function MyReports({ show, onOpen }: { show: boolean; onOpen: (studyId: number) => void }) {
+  const [rows, setRows] = useState<MyReportItem[]>([]);
+
+  const load = useCallback(async () => {
+    try {
+      setRows((await api.myReports()).reports);
+    } catch {
+      // The board already carries the "feed lost" banner for an unreachable server.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!show) return;
+    void load();
+    const timer = setInterval(() => void load(), REFRESH_MS * 2);
+    return () => clearInterval(timer);
+  }, [show, load]);
+
+  if (!show || rows.length === 0) return null;
+
+  return (
+    <div className="card">
+      <h2>Reports I signed</h2>
+      {rows.map((r) => (
+        <div className="workcase" key={r.reportId}>
+          <div className="who">
+            <strong>{r.accession ?? `study ${r.studyId}`}</strong>
+            <div className="sub">
+              {r.modality ?? '?'} {r.subSpecialty ?? ''} · {r.patientName ?? 'name not carried'} · {r.tenantCode}
+            </div>
+            <div className="sub">
+              v{r.version} · <span className={`state ${r.state === 'verified' || r.state === 'delivered' ? 'green' : r.state === 'signed' ? 'amber' : ''}`}>{r.state}</span>
+              {r.signedAt ? ` · signed ${new Date(r.signedAt).toLocaleString()}` : ' · not signed yet'}
+              {r.reviewerName ? ` · second name ${r.reviewerName}` : ''}
+            </div>
+            {r.amendmentReason && <div className="sub">correction: {r.amendmentReason}</div>}
+          </div>
+          <button onClick={() => onOpen(r.studyId)}>Open</button>
+        </div>
+      ))}
     </div>
   );
 }
@@ -362,7 +473,15 @@ export default function App() {
   // The viewer takes the whole window. A reader comparing two slices should not be doing
   // it in a panel the size of a sidebar, and the board behind it is not the thing on
   // screen while a case is open. The heartbeat keeps running underneath.
-  if (openStudy !== null) return <Viewer studyId={openStudy} onBack={() => setOpenStudy(null)} />;
+  if (openStudy !== null) {
+    return (
+      <Viewer
+        studyId={openStudy}
+        onBack={() => setOpenStudy(null)}
+        onChanged={() => { void refresh(); }}
+      />
+    );
+  }
 
   const counts = data?.counts ?? { green: 0, amber: 0, red: 0 };
 
@@ -407,6 +526,10 @@ export default function App() {
         )}
 
         {isReader && <Worklist onChanged={() => { void refresh(); }} onOpen={setOpenStudy} />}
+
+        {isReader && <ReviewQueue show onOpen={setOpenStudy} />}
+
+        {isReader && <MyReports show onOpen={setOpenStudy} />}
 
         {isOperator && <Waiting show={isOperator} onOpen={setOpenStudy} />}
 

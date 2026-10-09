@@ -312,6 +312,49 @@ and checks the pixels themselves; the points worth re-checking by hand on a real
   sentence. A reader staring at a black rectangle cannot tell "this node does not have it"
   from "this node is down", and those are different calls for different people.
 
+What has to be true of a report. `scripts/validation/run-report-flow.py` drives the whole
+lifecycle over HTTP — draft, sign, countersign, amend, and a signed clock pushed past its
+deadline — and the points worth re-checking by hand with two reader accounts:
+
+- **a signature needs words.** Leave Impression empty and Sign is refused, naming the field.
+  The button is greyed for the same reason: the browser applies
+  `packages/shared/src/report.ts`, the same module the route asks. If a client could sign a
+  blank impression, the rule was only ever decoration;
+- **a signed report cannot be edited.** Try to save text on one — the answer is
+  `signed_report_is_immutable`, and the only way to change it is an amendment, which starts a
+  new version carrying the words it corrects. The old row keeps both names and both
+  timestamps: `select version, state, signed_at, verified_at from telrad.reports where
+  study_id = N;` must show v1 `amended` and v2 live. If a version ever disappears, an
+  amendment was written as an edit;
+- **three different people are needed for three different acts.** The author signs; a
+  *different* reader with a grade at least the author's countersigns; and an amendment must
+  come from a grade **strictly above** the author of the version being corrected. Each
+  refusal names itself (`self_review`, `grade_below_author`, `grade_not_above_author`). A
+  database `CHECK` also forbids one id from holding both names, but that one answers 500, so
+  the route asks first;
+- **the reviewer must be able to see the images.** A reviewer is never the holder of the case
+  — exactly one live assignment per study is the routing rule — so the viewer answers
+  `reportAccess: {as: "review"}` and opens them anyway. A reviewer who cannot see the study
+  is signing on the author's word, which is what the second name exists to prevent. An author
+  keeps the same door (`as: "author"`), because signing takes the case off their desk;
+- **signing stops the clock and frees the queue.** `sla_clocks.signed_at` gets a value — the
+  one column the escalation sweep refuses to fire past — the assignment moves to `completed`,
+  and the case disappears from `/v1/my/work`. An assignment left `accepted` after its report
+  is signed keeps counting against `max_queue_size`, and that reader silently stops receiving
+  work while the board paints them at capacity;
+- **lateness is measured against the signature.** A report signed after its deadline is a
+  breach. A report signed *before* it is never a breach, even if the deadline is rewritten
+  afterwards (an orphan relinked, a contract renegotiated). If a signed-on-time case appears
+  on the late board, `isBreached` has gone back to comparing the deadline with the wall clock;
+- **an amendment does not restart the clock.** Deliberate: the center was answered on time by
+  the first signature, and a correction must not become a breach the dispatcher widens a pool
+  for.
+
+What is not built here yet: **delivery**. A report stops at `verified`; there is no PDF, no
+`delivered` state, nothing in `report_deliveries`, and `critical_events` — the closed loop for
+a critical finding with a named receiver who acknowledges it — has no writer. The center you
+are billing cannot see a single report in this product.
+
 Do **not** point OHIF at this deployment yet. `infra/orthanc/orthanc.json` contains a
 `DicomWeb` block with `Enable: true`, but `curl -s -u …/dicom-web/` answers 404 on the pinned
 image — the config is inert because the plugin is not loaded. Load it, re-measure, then revisit.
@@ -341,18 +384,25 @@ this deployment holds test data only.
 Built and proven on test data: the on-panel board and its heartbeat, the dispatcher that
 offers a case only to a green reader who covers it, the reader's own worklist with accept
 and decline, the escalation stages that widen the pool and stamp a breach, the operator's
-late board, manual assign with its reason and its reported coverage mismatch, and a viewer
+late board, manual assign with its reason and its reported coverage mismatch, a viewer
 that shows a reader the case they hold — grayscale, window and level, series strip, slice
-scroll — with the pixels verified against what the node actually stores.
+scroll — with the pixels verified against what the node actually stores, and the report
+desk: draft, sign, a second name from a different reader, and an amendment that supersedes
+the signed version instead of editing it.
 
-Not built: a **diagnostic** viewer. What exists has no hanging protocols, no MPR, no
-measurement or annotation tools, no cine, and shows one series at a time; it is enough to
-look at a study and not enough to sign one. Also missing: report authoring and the
-two-signature flow, delivery back to the center, billing and payouts, and any pager or SMS —
-`alert_ops` and `notify_center` are recorded, not sent.
+Not built: **delivery**. A report stops at `verified` — no PDF, no `delivered` state, nothing
+in `report_deliveries`, and `critical_events` (a critical finding with a named receiver who
+acknowledges it) has no writer. The referring clinic cannot see a single report in this
+product, which is also why the "notify the center" question stays open: there is no event to
+notify about yet. Not built either: billing and payouts, and any pager or SMS — `alert_ops`
+and `notify_center` are recorded, not sent. Not a **diagnostic** viewer either: what exists
+has no hanging protocols, no MPR, no measurement or annotation tools, no cine, and shows one
+series at a time; it is enough to look at a study and not enough to sign one in a reading
+room that expects those tools.
 The upload *endpoints* exist and are proven; the *agent* a center installs on its modality
 PC to call them does not, so today that channel only works for a browser upload or a
 script. README at the root lists the phase plan; docs/ARCHITECTURE.md states what exists,
 including the open items it names: **a declined case is never asked again**, **a widened
-offer has no ceiling**, the viewer ships text-shaped pixels and their byte cost, and frames
-are not individually audited.
+offer has no ceiling**, **nothing watches a report that is waiting for its second name**,
+`requires_reviewer` is displayed and enforced nowhere, the viewer ships text-shaped pixels
+and their byte cost, and frames are not individually audited.

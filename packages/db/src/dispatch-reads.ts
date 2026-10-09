@@ -70,6 +70,13 @@ export async function dispatchableStudies(
       sql`not exists (select 1 from ${assignments} a
                        where a.study_id = ${studies.id}
                          and a.state in ('offered', 'accepted', 'reading'))`,
+      // A signed report has answered the study, whatever the assignment table says
+      // afterwards. Signing moves the assignment to `completed`, which frees the reader and
+      // — without this line — puts the case straight back into the queue: the first run that
+      // took a report all the way to a countersignature produced exactly that, a fresh offer
+      // for a study that already carried two names. The clock's `signed_at` is the column
+      // escalation already refuses to fire past, so it is the column routing stops on too.
+      isNull(slaClocks.signedAt),
     ))
     .orderBy(
       // Highest clinical need first, then the oldest wait. This is the whole of the

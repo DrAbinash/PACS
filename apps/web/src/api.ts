@@ -71,6 +71,7 @@ export type WorkCase = {
   studyDescription: string | null;
   receivedAt: string;
   waitingMinutes: number;
+  report: { id: number; version: number; state: ReportState } | null;
 };
 
 export type LateCase = {
@@ -122,6 +123,13 @@ export type ViewDescriptor = {
     patient: { name: string | null; mrn: string | null; gender: string | null; dob: string | null };
   };
   held: { assignmentId: number; state: string } | null;
+  // Present when a reader may see this study without holding it: either a signed report is
+  // waiting for their second name, or the report on it is their own. A reviewer holds no
+  // assignment — routing keeps exactly one live lock per study — and signing completes the
+  // read, so without this an author could not look again at what they described.
+  reportAccess: {
+    reportId: number; version: number; state: ReportState; author: number; as: 'author' | 'review';
+  } | null;
   series: {
     index: number;
     pk: string;
@@ -157,6 +165,71 @@ export type ViewInstance = {
   patientOrientation: string | null;
 };
 
+export type ReportState = 'draft' | 'signed' | 'verified' | 'delivered' | 'amended' | 'withdrawn';
+
+export type ReportSection =
+  'clinicalHistory' | 'technique' | 'findings' | 'impression' | 'recommendation';
+
+export type ReportView = {
+  id: number;
+  studyId: number;
+  version: number;
+  state: ReportState;
+  sections: Partial<Record<ReportSection, string>>;
+  author: { userId: number; name: string; registration: string };
+  reviewer: { userId: number; name: string | null; registration: string | null } | null;
+  signedAt: string | null;
+  verifiedAt: string | null;
+  deliveredAt: string | null;
+  supersedesReportId: number | null;
+  supersedesVersion: number | null;
+  amendmentReason: string | null;
+  createdAt: string;
+  gaps: ReportSection[];
+  // The server's own answer about what this reader may do to this document, so the panel
+  // cannot offer a button the route is going to refuse.
+  can: { edit: boolean; sign: boolean; countersign: boolean; amend: boolean; withdraw: boolean };
+  history: {
+    id: number; version: number; state: ReportState; authorName: string;
+    signedAt: string | null; verifiedAt: string | null;
+  }[];
+  study: {
+    accession: string | null; modality: string | null; subSpecialty: string | null;
+    priority: string | null; studyDate: string | null; tenantCode: string | null;
+    requiresReviewer: boolean;
+  };
+  patient: { name: string | null; mrn: string | null; dob: string | null; gender: string | null };
+};
+
+export type MyReportItem = {
+  reportId: number;
+  studyId: number;
+  version: number;
+  state: ReportState;
+  accession: string | null;
+  modality: string | null;
+  subSpecialty: string | null;
+  patientName: string | null;
+  signedAt: string | null;
+  verifiedAt: string | null;
+  reviewerName: string | null;
+  amendmentReason: string | null;
+  tenantCode: string | null;
+};
+
+export type ReviewItem = {  reportId: number;
+  studyId: number;
+  version: number;
+  authorName: string;
+  authorGrade: string | null;
+  signedAt: string | null;
+  accession: string | null;
+  modality: string | null;
+  requiresReviewer: boolean | null;
+  mayClear: boolean;
+  reason: string | null;
+};
+
 export const api = {
   session: () => call<Session>('/v1/auth/session'),
   login: (email: string, password: string) =>
@@ -186,6 +259,32 @@ export const api = {
   // Pixels, not JSON: a 16-bit frame is two bytes a pixel and a study is hundreds of
   // frames, so the base of the image arrives as the bytes the node measured.
   viewFrame: (studyId: number, pk: string, index: number) => frame(studyId, pk, index),
+  report: (id: number) => call<{ report: ReportView }>(`/v1/reports/${id}`),
+  // A study with no report answers 404 `no_report`, which is the normal state of a case
+  // that has just been accepted, so the caller asks rather than catches.
+  reportFor: async (studyId: number): Promise<ReportView | null> => {
+    try {
+      return (await call<{ report: ReportView }>(`/v1/reports/current?studyId=${studyId}`)).report;
+    } catch (err) {
+      if (err instanceof ApiError && (err.code === 'no_report' || err.code === 'not_found')) return null;
+      throw err;
+    }
+  },
+  startReport: (studyId: number) =>
+    call<{ report: ReportView }>('/v1/reports', { method: 'POST', body: JSON.stringify({ studyId }) }),
+  saveReport: (id: number, sections: Partial<Record<ReportSection, string>>) =>
+    call<{ report: ReportView }>(`/v1/reports/${id}`, { method: 'PATCH', body: JSON.stringify({ sections }) }),
+  signReport: (id: number) =>
+    call<{ report: ReportView }>(`/v1/reports/${id}/sign`, { method: 'POST', body: '{}' }),
+  countersignReport: (id: number) =>
+    call<{ report: ReportView }>(`/v1/reports/${id}/countersign`, { method: 'POST', body: '{}' }),
+  amendReport: (id: number, reason: string) =>
+    call<{ report: ReportView }>(`/v1/reports/${id}/amend`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  withdrawReport: (id: number) =>
+    call<{ report: ReportView }>(`/v1/reports/${id}/withdraw`, { method: 'POST', body: '{}' }),
+  awaitingReview: () =>
+    call<{ generatedAt: string; myGrade: string | null; awaiting: ReviewItem[] }>('/v1/reports/awaiting-review'),
+  myReports: () => call<{ generatedAt: string; reports: MyReportItem[] }>('/v1/reports/mine'),
 };
 
 async function frame(studyId: number, pk: string, index: number): Promise<ArrayBuffer> {

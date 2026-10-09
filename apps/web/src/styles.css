@@ -120,3 +120,43 @@ form.login input { background: #0e141c; border: 1px solid var(--line); color: va
   background: #0e141c; color: var(--text); border: 1px solid var(--line); border-radius: 6px;
   padding: 5px 7px; font: inherit; width: 92px;
 }
+
+/* Image and document side by side. Stacked, a reader signs a report from memory of the
+   slices they scrolled past a minute ago, so the column is a fixed width and the image
+   keeps whatever is left rather than the other way round. */
+.reading { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr) 420px; align-items: start; }
+@media (max-width: 1200px) { .reading { grid-template-columns: minmax(0, 1fr); } }
+
+.notebar {
+  border: 1px solid var(--amber); background: color-mix(in srgb, var(--amber) 12%, transparent);
+  color: #ffe9c2; padding: 10px 12px; border-radius: 8px; margin-bottom: 14px; font-size: 14px;
+}
+
+.report { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 14px 16px; }
+.report h3 { margin: 0 0 10px; font-size: 16px; display: flex; gap: 8px; align-items: baseline; }
+.report .field { display: grid; gap: 4px; margin-bottom: 10px; }
+.report .field > span { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .5px; }
+.report .field .req { color: var(--amber); text-transform: none; letter-spacing: 0; font-style: normal; }
+.report textarea {
+  background: #0e141c; color: var(--text); border: 1px solid var(--line); border-radius: 8px;
+  padding: 8px 10px; font: inherit; resize: vertical; min-height: 44px;
+}
+.report textarea:focus { outline: 1px solid var(--green); }
+.report .text { margin: 0; white-space: pre-wrap; }
+.report .acts { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0 12px; }
+.report .acts input {
+  flex: 1 1 200px; background: #0e141c; color: var(--text); border: 1px solid var(--line);
+  border-radius: 8px; padding: 7px 9px; font: inherit;
+}
+.report .link { background: none; border: 0; color: var(--text); padding: 0; text-decoration: underline; }
+.report .note { color: var(--muted); font-size: 13px; border-left: 2px solid var(--line); padding-left: 10px; }
+
+/* The printed part. Separated because it is the half a center files and a patient asks
+   about, and it must never look like part of the prose it sits under. */
+.report .signatures {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 12px; border-top: 1px solid var(--line);
+  padding-top: 12px; margin-top: 12px; font-size: 14px;
+}
+.report .signatures p { margin: 0; }
+.report .history ul { margin: 6px 0 0; padding-left: 0; list-style: none; font-size: 13px; }
+.report .history li { padding: 2px 0; }

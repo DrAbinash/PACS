@@ -1,6 +1,6 @@
 import { and, eq, inArray } from 'drizzle-orm';
-import { type Db, appendAudit, assignments, patients, studies, storageNodes } from '@telrad/db';
-import { frameToBytes, parseMatlabFrame, tagValue } from '@telrad/shared';
+import { type Db, appendAudit, assignments, patients, reports, studies, storageNodes } from '@telrad/db';
+import { currentVersion, frameToBytes, parseMatlabFrame, tagValue } from '@telrad/shared';
 import { Router, type Response } from 'express';
 import { OrthancError, type OrthancClient } from '../orthanc.js';
 import { requireAuth, requireRole, scoped, scopeTenant, type Ctx } from '../auth.js';
@@ -73,7 +73,7 @@ export function viewRouter(db: Db, orthanc: OrthancClient): Router {
     const principal = ctx.principal!;
     const row = await loadCase(studyId);
     if (!row || row.tenantId === null || !row.nodePk || !NODE_ID.test(row.nodePk)) {
-      return { row: null, status: 404 as const, hold: null };
+      return { row: null, status: 404 as const, hold: null, access: null };
     }
     const scope = scopeTenant(principal);
     if (scope !== null && row.tenantId !== scope) {
@@ -81,7 +81,7 @@ export function viewRouter(db: Db, orthanc: OrthancClient): Router {
         actorUserId: principal.userId, actorKind: 'human', tenantId: row.tenantId,
         action: 'view.denied_cross_tenant', entity: 'studies', entityId: String(studyId),
       });
-      return { row: null, status: 404 as const, hold: null };
+      return { row: null, status: 404 as const, hold: null, access: null };
     }
     if (READER_ROLES.includes(principal.role)) {
       const [held] = await db.select({ id: assignments.id, state: assignments.state }).from(assignments)
@@ -90,10 +90,29 @@ export function viewRouter(db: Db, orthanc: OrthancClient): Router {
           eq(assignments.clinicianUserId, principal.userId),
           inArray(assignments.state, ['offered', 'accepted', 'reading']),
         )).limit(1);
-      if (!held) return { row, status: 403 as const, hold: null };
-      return { row, status: 200 as const, hold: held };
+      if (held) return { row, status: 200 as const, hold: held, access: null };
+      // Two clinical reasons to see the pixels without holding the case, and they are the
+      // same fact from either side of a signature: the reader who wrote a report has to be
+      // able to look at what they described — including after signing, which completes the
+      // read and takes the case off their desk — and the reader being asked for a second
+      // name must be able to check it before giving it. One live lock per study is a
+      // routing rule, and neither of these may steal it.
+      const versions = await db.select({
+        reportId: reports.id,
+        version: reports.version,
+        state: reports.state,
+        author: reports.authorUserId,
+      }).from(reports).where(eq(reports.studyId, studyId));
+      const live = currentVersion(versions);
+      if (live && live.author === principal.userId) {
+        return { row, status: 200 as const, hold: null, access: { ...live, as: 'author' as const } };
+      }
+      if (live && live.state === 'signed') {
+        return { row, status: 200 as const, hold: null, access: { ...live, as: 'review' as const } };
+      }
+      return { row, status: 403 as const, hold: null, access: null };
     }
-    return { row, status: 200 as const, hold: null };
+    return { row, status: 200 as const, hold: null, access: null };
   }
 
   function denied(res: Response, status: number) {
@@ -167,7 +186,7 @@ export function viewRouter(db: Db, orthanc: OrthancClient): Router {
         accession: row.accession,
         series: tree.series.length,
         instances: tree.series.reduce((n, s) => n + s.instances.length, 0),
-        held: auth.hold?.state ?? 'operator',
+        held: auth.hold?.state ?? (auth.access ? auth.access.as : 'operator'),
       },
     });
 
@@ -190,6 +209,10 @@ export function viewRouter(db: Db, orthanc: OrthancClient): Router {
         },
       },
       held: auth.hold ? { assignmentId: auth.hold.id, state: auth.hold.state } : null,
+      // Said out loud, because the screen has to distinguish "reading" from "being asked
+      // to put a second name on somebody else's reading", and neither from "opening the
+      // case I already signed".
+      reportAccess: auth.access,
       series: tree.series.map((s, index) => ({
         index,
         pk: s.pk,

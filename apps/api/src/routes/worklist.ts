@@ -9,15 +9,16 @@ import {
   offerHistory,
   panelReaders,
   patients,
+  reports,
   slaClocks,
   studies,
   tenants,
   users,
 } from '@telrad/db';
 import {
-  OFFER_ACCEPT_SECONDS, cleanText, coversCode, dueStages, elapsedPct, isBreached, newToken, pickReader,
-  tzOffsetMinutes, widenStage,
-  type ClockLike, type DispatchStudy, type EscalationRule,
+  OFFER_ACCEPT_SECONDS, cleanText, coversCode, currentVersion, dueStages, elapsedPct, isBreached,
+  newToken, pickReader, tzOffsetMinutes, widenStage,
+  type ClockLike, type DispatchStudy, type EscalationRule, type ReportState,
 } from '@telrad/shared';
 import { Router } from 'express';
 import { requireAuth, requireRole, scoped, scopeTenant, type Ctx } from '../auth.js';
@@ -76,6 +77,24 @@ export function worklistRouter(db: Db): Router {
       action: 'worklist.read', entity: 'assignments', detail: { count: rows.length },
     });
 
+    // Whether a case already carries a report is the difference between "open this" and
+    // "finish the draft you left at 03:00", and it is answered by the same currentVersion()
+    // the report routes use, so a desk and a document cannot point at two different
+    // versions of one study.
+    const reportOfStudy = new Map<number, { id: number; version: number; state: ReportState }>();
+    if (rows.length > 0) {
+      const found = await db.select({
+        id: reports.id,
+        studyId: reports.studyId,
+        version: reports.version,
+        state: reports.state,
+      }).from(reports).where(inArray(reports.studyId, rows.map((row) => row.studyId)));
+      for (const row of rows) {
+        const hit = currentVersion(found.filter((f) => f.studyId === row.studyId));
+        if (hit) reportOfStudy.set(row.studyId, { id: hit.id, version: hit.version, state: hit.state });
+      }
+    }
+
     // The lock token is deliberately absent from this list: it is issued once, at
     // acceptance, and a board that re-echoed it would make a screenshot a credential.
     res.json({
@@ -87,6 +106,7 @@ export function worklistRouter(db: Db): Router {
         expiresAt: row.state === 'offered'
           ? new Date(row.offeredAt.getTime() + OFFER_ACCEPT_SECONDS * 1000)
           : null,
+        report: reportOfStudy.get(row.studyId) ?? null,
       })),
     });
   });

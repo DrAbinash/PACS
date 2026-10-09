@@ -160,6 +160,57 @@ the only place a path appears.
 - **Frames cross as `int16-le` with `no-store`.** The headers carry the format and the
   pixel count so the browser does not have to guess what it is holding, and a cached frame
   would outlive the assignment that made it readable.
+- **A signed report cannot be edited, and `amend` is the only way to change one.** The old
+  row keeps its text, both names and both timestamps and only changes state; a new version
+  starts as a draft **carrying the words it corrects**, because an amendment that opens on a
+  blank page loses the findings it was written against. One function decides which row a
+  study answers with (`currentVersion`, highest version that is not `amended`/`withdrawn`)
+  and it is called by the desk, the routes and the pixel authorisation, so three screens
+  cannot point at three different versions of one study.
+- **The second name is a rule in two places, and both are needed.** A `CHECK`
+  (`reports_not_self_review`) makes it impossible for one id to sign and clear the same
+  report — which is the right thing, because a defect in application code would otherwise be
+  silent — and the shared function `countersignDecision` refuses it *before* the insert, with
+  a reason the reader can read. A constraint violation arrives as a 500 and answers nothing.
+  The grade rules (`reviewerMayClear`, `mayAmend`) live beside it: clearing needs a grade at
+  least the author's, amending needs one **strictly above**, because a self-correction is
+  indistinguishable from an unreviewed edit once both are in one table.
+- **Signing stops the clock and frees the queue in the same request.** It writes
+  `sla_clocks.signed_at` (the one column `dueStages` refuses to fire past) and moves the
+  reader's assignment to `completed`. Left `accepted`, the case would keep counting against
+  `max_queue_size` after the report was signed and that reader would quietly stop receiving
+  work while the board painted them at capacity — the same failure mode as a declined case
+  that is never asked again, arrived at from the other direction.
+- **Lateness is frozen at the signature.** `isBreached` compares `signed_at` to the deadline,
+  not `now` to the deadline. The report flow found the old form by pushing an already-signed
+  clock's deadline into the past: the sweep stamped `breached = true` and wrote an
+  `sla.breached` row for a report that had been answered inside its window. A deadline that
+  moves afterwards — an orphan relinked, a contract renegotiated, a verification script —
+  must not rewrite history, and this is the number a center's QC is measured on. The board and
+  the worker both call the one function, so the fix is one function.
+- **Three doors open the pixels, and only one of them is a desk.** A reader who holds the case,
+  a reader whose *own* report is on it, and a reader a signed report is waiting on. The last
+  two exist because one live lock per study is a routing rule: a reviewer is never assigned
+  the case they are clearing, and an author loses the case from their desk at the moment they
+  sign it. Without those branches the console would contain a report nobody in it can re-read
+  against the images it describes.
+- **Reading a report is wider than reading its pixels, and the reason is the same reviewer.**
+  Non-authors may read the published states — `signed`, `verified`, `delivered`, `amended` —
+  and never a draft, whoever they are: a half-written impression reaching a colleague or the
+  referring clinic is how "question of perforation" gets read as a diagnosis. The rule is
+  `mayReadReport` in `@telrad/shared` rather than an `if` in the route, because it is testable
+  without a database and because a role nobody thought about (`typist`, desk staff) should get
+  the conservative answer by falling through, not by being named.
+- **There is no autosave, and the audit row says what changed.** Saving is a button. The
+  audit detail carries the section names and each one's length, because the question after a
+  dispute is what the document said, and a hash of a jsonb blob does not answer it. A draft
+  that rewrote itself on every keystroke would make the sentence "this is what they signed"
+  unanswerable.
+- **`dispatch-once` was a mode of `main.ts` and not a package script, so every documented way
+  of running the sweep failed.** Three validation scripts and the deploy notes told an operator
+  to run `pnpm --filter @telrad/worker dispatch-once`, which answers "None of the selected
+  packages has a script" — a first deploy could be routed at all only by guessing the `tsx`
+  invocation. It is a real script now, so the documented command is the working command.
 
 ## Known open items, stated rather than implied
 
@@ -200,6 +251,36 @@ the only place a path appears.
   slice. It draws the pixels with an adjustable window and it scrolls. The gap between that
   and what a radiologist signs a report against is the DICOMweb item above, not more canvas
   code.
+
+- **Nothing is delivered, and `delivered` is a state nothing can reach.** A report stops at
+  `verified`. No PDF is rendered and `pdf_sha256` is never written; `report_deliveries` has
+  rows in no table and no code path; there is no print stylesheet, so the console panel is
+  the only way any human reads a report — acceptable for a reader, not for a referring
+  clinic. This is also the item that blocks the notification question: "report ready" has no
+  producer until a report leaves the system.
+- **A report waiting for a second name is invisible to escalation.** `dueStages` stops at
+  `signed_at`, which is right for the contract, and the consequence is that *nothing* watches
+  an uncountersigned report. `sub_specialties.requires_reviewer` is read, displayed in the
+  panel as "required, and missing" and enforced nowhere: a case that must carry two names can
+  sit with one forever, and no board says so. The review queue shows a reviewer what is waiting;
+  nobody shows the operator that it has been waiting for six hours.
+- **Critical findings are modelled and unwritten.** `critical_events` carries a condition
+  code, who detected it, who was told, by which channel, the receiver's name and role, the
+  acknowledgement time and a ten-minute SLA — and nothing in the codebase inserts a row. The
+  tempting implementation, matching the impression text against a condition list, was
+  rejected: a confident false positive at 2 a.m. is worse than no alert, and a missed one is a
+  patient. The plan is an explicit declaration by the signing reader with a closed
+  acknowledgement loop, which is the same phase as delivery.
+- **An amendment deliberately does not reopen the clock, and its own turnaround is not
+  measured.** The center was answered on time by the first signature, so a correction cannot
+  become a breach the dispatcher widens a pool for. The cost: there is no column for the time
+  from "amendment requested" to "amendment signed", so if a contract ever prices corrections,
+  that number has to be captured at the time rather than derived afterwards from the audit
+  trail.
+- **Report text is five fixed sections.** Findings and Impression must carry words; clinical
+  history, technique and recommendation are optional. No per-sub-specialty templates, no
+  dictation, and the `structured` jsonb column exists with nothing writing it. The `typist`
+  role is in the enum and no part of the report path uses it.
 
 - **A declined case is never asked again, and widening cannot fix that.** Rotation
   refuses to re-offer a study to a reader who has already been asked, so the chest film
@@ -296,7 +377,7 @@ schedule, which is why retention is data and not a constant.
 | Component | State |
 | --- | --- |
 | `packages/db` schema (31 tables) + `migrations/0000_*.sql` | **Applied to a real PostgreSQL 16**; 31 tables created in `telrad`, nothing leaked into `public` |
-| `packages/shared` match + classify + two-signature rules + audit chain | Built; the package carries **97 assertions across six files** (order matching, classify + enums + the audit chain in one, presence, the routing rule, the escalation rule, request validation). Region codes derive from (modality, region); obstetric is tested before abdomen on purpose |
+| `packages/shared` match + classify + two-signature rules + audit chain | Built; the package carries **145 assertions across eight files** (order matching, classify + enums + the audit chain in one, presence, the routing rule, the escalation rule, the report lifecycle, pixel parsing and windowing, request validation). Region codes derive from (modality, region); obstetric is tested before abdomen on purpose |
 | `apps/api` health, login/session/logout, tenant-scoped study reads, audit read | Built and **exercised over HTTP**: login issued a session cookie, a wrong password got 401, an unknown `state` param got 400, an unauthenticated read got 401 |
 | `apps/api` bootstrap + `verify-audit` | Ran against the test database: owner + tenant + node + catalogs written, audit chain verified `rows=4 broken=0` |
 | `apps/api` order and patient entry, site registration, agent tokens, upload batches, orphan queue | Built and **exercised over HTTP** by `scripts/validation/run-p1-flow.py`, which now drives the agent steps with a token and **no cookie jar** — the first version of that script reused the console session and hid a defect that made the whole upload channel unreachable for an agent |
@@ -312,15 +393,20 @@ schedule, which is why retention is data and not a constant.
 | `apps/api` accept / decline / my-work / unassigned | **Proven live over HTTP and in the browser**: accept returned a one-time lock token, wrote `assignments.accepted_at` *and* `sla_clocks.accepted_at`; a second accept got 409 `not_offered`; another reader's assignment answered 404, not 403; decline without a reason got 422 and with one released the case. `GET /v1/dispatch/unassigned` named the real gap on the declined chest study: `Dr Chest — already_offered`. Dr Second accepted through the console's own Accept button and the row moved to `accepted` |
 | Reader provisioning (`cli add-reader`) | Built and used by the verification. Requires coverage lists, and refuses a stray argument: an unquoted `--name Dr Second` used to create an account called "Dr", which then won the alphabetical tie-break for the STAT case. Real routing bug, found through a real CLI trap |
 | Console worklist for the reader | Built and **seen in the browser**: "Your cases" renders the live offer with Accept and Decline, a per-second countdown to the lapse, and the patient/modality/accession line; Accept was clicked and the database row confirmed `accepted` with a lock token. Layout has not been reviewed as an image — this browser gives no viewport |
-| Viewer, reports, delivery, billing | Reports, delivery and billing are **not built**. The viewer exists and draws real pixels with an adjustable window, but it is not diagnostic-grade — see the open items |
+| Viewer, reports, delivery, billing | Delivery and billing are **not built**, and `delivered` is a state nothing can reach. The viewer draws real pixels with an adjustable window but is not diagnostic-grade; the report lifecycle (draft → sign → countersign → amend) is built and proven below — see the open items for what is still missing |
+| Report lifecycle (`packages/shared/src/report.ts`) | Built, **27 assertions**: which state permits which verb (a signed report is editable by nothing and amendable only by a strictly higher grade), that a newline counts as nothing written in a required section, the three separate countersignature refusals (same person / no grade recorded / grade below the author), `nextVersion`, `currentVersion` answering with the newest live row and never a superseded one, and `mayReadReport` keeping a draft from every non-author including a colleague in the same tenant |
+| `apps/api` report routes (`/v1/reports`) | **Proven live over HTTP** — `scripts/validation/run-report-flow.py`, 46 assertions in `--phase check` and 10 in `--phase late-clock-after-sign`, run from an empty database. A reader who does not hold the case cannot start a report (403 `not_your_case`) and cannot open its images; a colleague can read a signed report but gets 404 on somebody else's *draft*; a misspelled section is refused rather than dropped; signing with an empty Impression answers `sections_blank:impression`; the signature block carries the registration number (`WB-100001`), not the screen name; a signed report refuses a PATCH with 409 `signed_report_is_immutable`; signing writes `sla_clocks.signed_at`, moves the assignment to `completed` and the case vanishes from `/v1/my/work`; the author is offered no countersignature of their own; a junior sees the report in the review queue with `mayClear: false, reason: grade_below_author` and is refused the same way when they try; a chief clears it and both registrations are stored on two different user ids; an amendment without a reason is refused, one by the author or by a junior is refused on grade, and the accepted one produces v2 as a draft that **carries v1's text**, supersedes it by id *and* by version number, while v1 keeps both names and both timestamps; `?studyId=` answers with v2; the author and the reviewer can each find their own row in `/v1/reports/mine` |
+| Routing and escalation stop at a signature | **Measured on the same run.** With the clock pushed to sit between the signature and now, the sweep reported `escalate checked=1 staged=0 breached=0 actions=none`, the late board stayed empty, `count(*)` over `sla.escalated`/`sla.breached` for that accession was 0, and no live assignment survived. The first version of this run did **fail** the last of those: signing completed the assignment, which returned the study to the dispatchable queue and produced a fresh offer (`attempt 2`) for a case two names had already answered. `dispatchableStudies` now refuses any study whose clock carries `signed_at` — the same column `dueStages` stops at — so the operator's "why is this nobody's case" read and the sweep cannot disagree about an answered study |
+| Console report desk | Built and **seen in the browser** end to end as two different readers. As Dr Chief: *Start the report* → five fields with Findings and Impression marked required, the status line reading `unsaved words` while typing and `saved` after the button, Sign enabled only when both required fields hold words, and after signing the text renders read-only under `Signed / Dr Chief · WB-400004 / 12:51:46` with `Second name / required, and missing`. As Dr Chief again on somebody else's report: the review queue named the case and their own grade, *Review* opened the images with the bar saying plainly why they were not holding the case, and *Add my second name* moved the panel from `signed` to `verified` and filled the second block. As Dr Junior: the same queue entry refused them with the sentence, and the viewer still opened. The desk now carries a `report signed v2` chip on each case, and "Reports I signed" lists what a reader has already answered — signing takes the case off the desk, so without that list there is no link back to one's own report. Layout has not been reviewed as an image: this browser gives no viewport |
+| `pnpm --filter @telrad/worker dispatch-once` | Was a mode of `main.ts` with no package script, so **every documented way of running the sweep failed** with "None of the selected packages has a script" — three validation scripts and the deploy notes among them. It is a real script now; the verification above ran it as written |
 | Orthanc capability probe (`.tmp` scripts, now `scripts/validation/probe-*.py`) | Run against the pinned digest before the viewer was designed: plugins loaded, tag endpoints, every rendering endpoint with and without a window, the numeric frame path and its exact text shape. The result is the six viewer rules above, and it overturned three endpoint names this repository's own worker had assumed |
 | `apps/api` viewer routes (`/v1/view/:studyId`) | **Proven live over HTTP** (`scripts/validation/run-view-flow.py`, 17 assertions): the holder opens a case and gets its series with instance ids; the frame arrives as 8,192 bytes of `int16-le` with `X-Telrad-Pixel-Count: 4096` and `Cache-Control: no-store`, and **all 4,096 values equal the arithmetic the fixture wrote** (`0 of 4096 differ`); two slices of one study are two different images. Another reader gets 403 `not_your_case`, an instance belonging to somebody else's study gets 404 `not_in_this_study`, no session gets 401, a malformed node id gets 400 before the node is asked, and `frameIndex` out of range gets 400. An operator may open a case they do not hold, and every open writes `view.open` |
 | Console viewer | Built and **seen in the browser** as the reader who holds the case: `ACC-VIEW-1` opens full-window with the header, the series strip (`HEAD NATIVE 3`), `slice 1 / 3` and `64×64 · 12-bit · windowed here`. The canvas holds an image, not a rectangle — **217 distinct grey levels, min 0 / max 255, mean 61.2**; ArrowDown moved to slice 2 (222 distinct, mean 58.7); narrowing the window to 60 collapsed it to 45 distinct levels, which is the window doing work on this side of the wire. The chest reader's DX film, which carries **no WindowCenter at all**, drew through the stored-range fallback at 80 distinct levels / mean 52.3 rather than going black. Console shows only the expected 401s from `/v1/auth/session` after a logout |
-| Escalation rule (`packages/shared/src/escalation.ts`) | Built, 16 assertions: `elapsedPct` (unclamped above 100, zero-window measured as 100), `rulesFor` (a tenant's rows **replace** the platform's for that priority, they do not merge), `dueStages` (nothing fires on a signed clock, every missed stage returns in one pass), `widenStage` |
+| Escalation rule (`packages/shared/src/escalation.ts`) | Built, 18 assertions: `elapsedPct` (unclamped above 100, zero-window measured as 100), `rulesFor` (a tenant's rows **replace** the platform's for that priority, they do not merge), `dueStages` (nothing fires on a signed clock, every missed stage returns in one pass), `widenStage`, and `isBreached` measured **against the signature** — a clock signed inside its window is not late however its deadline is rewritten afterwards, and a clock signed after it is |
 | `apps/worker` escalation pass | **Proven live on the real clocks.** Crossing 55 % produced `escalate checked=3 staged=2 breached=0 actions=widen_pool:2` and one `sla.escalated` row per clock with `actor_kind = system`; 80 % produced `alert_ops:1`; pushing a case from 65 % straight to 98 % fired **stages 2 and 3 in one pass** with two audit rows, and the deadline pass reported `breached=2`. An immediate second pass reported nothing, and the breach count in `audit_log` is still one row per clock |
 | The widened offer, measured | The chest study whose only cover had just filled their one-slot queue was offered anyway (`dispatch widened=1`) and they accepted, taking the queue to **2 of 1**; the manual assign below made it 3 of 1, which is the open item rather than a surprise. The spine MRI whose only full cover was *paused* stayed unheld at the same stage: `poolWidened=true, status=blocked, nearest=Dr Paused (not_routable)`. Dr Green, green and idle for the whole run with the wrong lists, was never offered anything at any stage |
 | `apps/api` late board and manual assign | **Proven live over HTTP**: `GET /v1/escalations` listed only clocks with something to say (`{open:3, late:0}` before any stage fired, `{open:3, late:2, breached:2, unheld:0}` after), and each row carried `% of the window`, the stage, and the named holder with their state. `POST /v1/assignments` refused a non-reader with 404 and a missing reason with 422, then assigned the MRI to the chest reader as 201 with `warning: "Dr Chest does not list sub-specialty mr-spine or modality MR"`, refused the duplicate as 409 `already_assigned`, and the board then named him as the holder |
-| Audit chain written by **two processes** | The api writes human rows and the worker writes system rows into one chain. `verify-audit` on the finished run: `audit rows=125 broken=0`. It did **not** verify at first — `hash mismatch at id=46`, the worker's first escalation row, because a `Date` in an audit detail hashed as `{}` and read back as a string. Fixed in `canonicalise`, with a test that hashes the write-time object and the read-back row to the same value |
+| Audit chain written by **two processes** | The api writes human rows and the worker writes system rows into one chain. `verify-audit` on the finished escalation run: `audit rows=125 broken=0`; on the finished report run: `audit rows=50 broken=0`, with `report.draft_created`, `report.draft_saved` (which fields, and each one's length), `report.signed` (with `late`, measured against the clock at that moment), `report.countersigned`, `report.amended` (supersedes id, from-version, to-version, the reason and both grades), `report.read` and `view.open` all in it. It did **not** verify at first — `hash mismatch at id=46`, the worker's first escalation row, because a `Date` in an audit detail hashed as `{}` and read back as a string. Fixed in `canonicalise`, with a test that hashes the write-time object and the read-back row to the same value |
 | Console "Waiting" card | Built and **seen in the browser** as the owner: two overdue rows painted breached (`overdue by 7 min`, `499% of the window · stage 3`, `Dr Chest — accepted`) under the late table, and the "Cannot route automatically" section naming `study 10 · stage 0 · nearest: Dr Chest (queue_full)`. Header counts matched `/v1/panel` exactly (`0 routable, 2 not routable, 1 off`). Layout has not been reviewed as an image — this browser gives no viewport, and its hidden-tab timer throttling means a scripted check must press Refresh rather than trust the poll |
 
 Nothing in this repository has processed a patient study. The studies it has

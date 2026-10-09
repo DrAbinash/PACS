@@ -7,7 +7,8 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
-    "./pixels": { "types": "./dist/pixels.d.ts", "default": "./dist/pixels.js" }
+    "./pixels": { "types": "./dist/pixels.d.ts", "default": "./dist/pixels.js" },
+    "./report": { "types": "./dist/report.d.ts", "default": "./dist/report.js" }
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

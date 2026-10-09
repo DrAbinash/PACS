@@ -73,6 +73,12 @@ export function dueStages(clock: ClockLike, rules: EscalationRule[], now: Date):
 export function isBreached(clock: Pick<ClockLike, 'deadlineAt' | 'signedAt'>, now: Date): boolean {
   // A report signed after the deadline still counts as a breach: the contract term is
   // the time to a signed report, not the time to somebody eventually noticing.
+  if (clock.signedAt) return clock.signedAt.getTime() > clock.deadlineAt.getTime();
+  // The other half of the same sentence: once the answer exists, lateness is frozen at the
+  // gap between it and the deadline. Measuring a signed clock against the wall instead
+  // would let a deadline moved afterwards — a re-clock after an orphan is linked, a
+  // contract renegotiation, a verification script — turn a report that was answered inside
+  // its window into a breach on the number a center is billed against.
   return now.getTime() > clock.deadlineAt.getTime();
 }
 

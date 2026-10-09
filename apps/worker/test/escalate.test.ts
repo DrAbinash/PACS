@@ -87,6 +87,21 @@ describe('escalateOnce', () => {
     expect(h.actions[0]?.detail).toMatchObject({ signedAt: new Date('2026-10-09T04:30:00Z') });
   });
 
+  // Lateness is frozen at the signature. A clock whose deadline is rewritten afterwards —
+  // a re-clock, a contract change, this repository's own verification script — must not
+  // give a reader a breach they never caused.
+  it('does not stamp a breach on a case signed inside its window', async () => {
+    const signedOnTime = clock({
+      signedAt: new Date('2026-10-09T01:30:00Z'),
+      deadlineAt: new Date('2026-10-09T02:00:00Z'),
+    });
+    const h = fakeClocks([signedOnTime]);
+    const r = await escalateOnce(h.port, { now: () => NOW });
+    expect(r.staged).toBe(0);
+    expect(r.breached).toBe(0);
+    expect(h.actions).toEqual([]);
+  });
+
   it('records a breach once, not on every pass', async () => {
     const breached = clock({ deadlineAt: new Date('2026-10-09T01:00:00Z') });
     const h = fakeClocks([breached]);
