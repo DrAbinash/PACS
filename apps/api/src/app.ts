@@ -247,6 +247,12 @@ export function createApp(deps: AppDeps): Express {
   app.use('/v1', criticalsRouter(db));
   app.use('/v1', billingRouter(db));
 
+  // An unknown `/v1/...` path answers with JSON, not Express's HTML 404. Every other
+  // failure mode in this API speaks JSON, and a client should not have to special-case one.
+  app.use('/v1/*', (_req, res) => {
+    res.status(404).json({ ok: false, error: 'not_found' });
+  });
+
   // Mounted last: this is the only responder for anything that reached `next` with
   // an error, and it is what keeps a rejected database read from becoming a dead
   // process. See handler.ts for why the wrapper above it is not optional.

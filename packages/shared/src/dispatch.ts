@@ -11,6 +11,14 @@ import { readerPresence, type ReaderState } from './presence.js';
 // not refreshing a screen) and still keep a STAT case inside its window.
 export const OFFER_ACCEPT_SECONDS = 300;
 
+// A widened offer admits a reader who is present and full, but not infinitely full. An
+// over-capacity queue is a clinical risk — a reader holding three studies against a
+// one-slot declaration is not "busy", they are a bottleneck that cannot be seen — so
+// the ceiling is one over the declared maximum. STAT cases do not get a second over,
+// because a case that cannot wait also cannot wait for a reader who is already past
+// what they said they could handle.
+export const MAX_OVER_CAPACITY = 1;
+
 export const ALL_CODES = '*';
 
 export type DispatchStudy = {
@@ -128,8 +136,11 @@ export function pickReader(
     });
     // Widening admits a reader who is *present and full*, which is the only amber that
     // means "busy" rather than "unreachable" or "declined". A paused reader stays
-    // untouched and a stale tab is still a dead tab.
-    const widened = !presence.routable && presence.code === 'at_cap' && opts.allowAtCap === true;
+    // untouched and a stale tab is still a dead tab. But not infinitely full: a reader
+    // past the ceiling is a clinical risk, not a resource, so the widened path refuses
+    // them the same way it refuses a paused reader.
+    const widened = !presence.routable && presence.code === 'at_cap' && opts.allowAtCap === true
+      && reader.openCases < reader.maxQueueSize + MAX_OVER_CAPACITY;
     if (!presence.routable && !widened) {
       rejectedFor.push(presence.code === 'at_cap' ? 'queue_full' : 'not_routable');
     }
