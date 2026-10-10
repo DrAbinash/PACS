@@ -463,6 +463,59 @@ the only place a path appears.
   REST-pushed file has no `RemoteAET`, so if the label is ever refused the study lands
   in the orphan queue as `site_unresolved` rather than being guessed at; the instance
   is still recorded as `pushed`, because the bytes really are archived.
+- **The agent takes a folder only when a second scan agrees, and it never deletes anything.**
+  `apps/agent/src/main.ts` lists the watch root, and a folder is eligible when every file is older
+  than `--settle` *and* the same listing appeared on the previous scan with the same names, sizes
+  and times (`folderSignature`). Orthanc flips a study to stable about two minutes after the last
+  instance, so a scanner that wrote slice 30 forty seconds ago and will write slice 31 in a minute
+  is exactly the case a single scan cannot tell from a finished study — and sealing half a study
+  sends a radiologist a partial exam. Deleting or moving the source after a send would be the
+  simple answer: the export folder is the center's copy until the archive confirms the study, so
+  an agent that eats its input turns a failed night into lost patients, and the cursor in
+  `telrad-agent-state.json` remembers instead. `--once` trades the second scan for the settle
+  window alone, because cron has no next pass to agree with.
+- **Identity is name, size and mtime, then content — and a re-send is a decision, not an
+  accident.** A file whose three match the cursor is never opened, which is what makes a scan of
+  a two-terabyte history cheap enough to run every twenty seconds beside a scanner. A file whose
+  mtime moved but whose sha256 did not (a folder copied, a share re-mounted) is hashed once, not
+  re-sent, and its record is updated in place. `refused` is the one status that is asked again:
+  the server rejected those bytes, and the file on disk may have been rewritten since.
+  `quarantined` is finished, not failed — the bytes are on the server and saying they are not an
+  image; sending them a fifth time will not make one.
+- **A batch left open is resumed by its own id, never re-opened.** If the connection dies halfway
+  through a study, the next pass fills the same `upload_batches` row and seals it; two
+  half-batches read to the worker as two studies nobody ordered. The failure is recorded per
+  folder with a backoff (5, 15, 60, 300, 900 s) so an api that is down for the night is not hit
+  every twenty seconds by every modality PC on the network, and a folder with nothing left to send
+  is *not* marked failed — that distinction is the difference between a retry and a false alarm.
+- **A folder's name is a patient until proven otherwise, so the log prints a digest.** Export
+  directories on real modalities are routinely named `KAVITA RAO CT HEAD 20261010`, and the agent
+  log is the file somebody attaches to a vendor support email. `redactFolder` is on by default and
+  `--log-names` is the deliberate opt-out for the operator debugging their own machine.
+- **Batch hints come from an operator-stated template with three tokens, and an unknown one is an
+  error.** `--hints "{accession}-{date}"` is applied to the folder's *leaf* name by an anchored,
+  shape-aware regex — the date token is eight digits and the accession token is a character class,
+  because `{accession}-{date}` against `ACC-4477-20261010` only splits in the right place if the
+  engine knows where the date begins; the first version split at the first dash and produced
+  `ACC`. There is deliberately no `{patient}`, `{mrn}` or `{name}` token: asking for one throws
+  rather than capturing a name into a column the rest of the tenant can read. A value that does
+  not validate yields **no** hint rather than a near one, which the live run proved both ways: the
+  folder called `ACC-AGT-1` arrived with a hint and linked by accession, and the folder called
+  `RAVI KUMAR CT 20261010` arrived with `accession_hint = null` and still linked, because linking
+  uses the accession inside the file and a wrong hint would have attached it to the wrong patient.
+- **The credential never touches argv, and cleartext is refused.** `--token` raises an error
+  because the process list is readable by every other account on a shared workstation and lands in
+  shell history; `--token-file` and `TELRAD_AGENT_TOKEN` are the only paths. An `http://` origin is
+  refused unless `--allow-insecure-http` is passed, because the site token rides on every request —
+  which is why the loopback validation runs say so explicitly rather than by omission.
+- **Two defects the agent's own live run caught, both in the tooling.** The first argument parser
+  advanced twice for a flag that took a value and once for a boolean, so `--once --dry-run`
+  silently dropped `--dry-run` and sent real files in what the operator believed was a rehearsal —
+  found on the second flag tried, now a named regression test. And a batch that holds nothing but
+  quarantined files was refused with `422 no_dicom_files_received` and left `open` in the database
+  forever: a state no sweep picks up and no screen explains, which is where a study hides. It is
+  now `rejected`, audited as `upload.batch_rejected`, and the agent's local close and the server's
+  row agree.
 - **Priority on the automatic path is inferred, not ordered — and the escalation engine
   now sits on top of the inferred one.** `classifyStudy` reads STAT/URGENT out of DICOM
   text and the matched order's own `priority` is never consulted, so an urgent order
@@ -474,10 +527,12 @@ the only place a path appears.
 - **Two tenants claiming one instance is refused, but only proven by unit test.** The
   rule is in `attributeByBatch`; it has not been exercised live, because doing that
   needs a second tenant filing the same pixels.
-- **`studies.instance_count` counts what the poller saw, not what is stored.** Rewinding
-  `ingest_cursors` to re-scan inflates it, and `bytes` with it. Nothing in the product
-  quotes those numbers to a center yet; before it does, the count should come from
-  Orthanc's study statistics instead of from a per-poll increment.
+- **`studies.instance_count` was one short on every study, and is the node's number now.** It
+  used to be a per-poll increment whose insert branch never seeded the row, so a three-instance
+  study was filed as two; measured live on the upload channel against
+  `GET /studies/{pk}/statistics` (node 3 and 2, database 2 and 1). Rewinding `ingest_cursors` to
+  re-scan still moves `bytes`, which is why the authoritative stamp happens at settle rather than
+  on every poll. Nothing quotes these numbers to a center yet — Phase F will be the first.
 - **`DicomAet` in `infra/orthanc/orthanc.json` is not honoured by Orthanc 1.13.0** —
   the boot log says `DICOM server listening with AET ORTHANC` while the config asks
   for `TELRAD`. Tenant routing does not depend on it, because provenance is taken
@@ -528,6 +583,9 @@ schedule, which is why retention is data and not a constant.
 | `apps/api` bootstrap + `verify-audit` | Ran against the test database: owner + tenant + node + catalogs written, audit chain verified `rows=4 broken=0` |
 | `apps/api` order and patient entry, site registration, agent tokens, upload batches, orphan queue | Built and **exercised over HTTP** by `scripts/validation/run-p1-flow.py`, which now drives the agent steps with a token and **no cookie jar** — the first version of that script reused the console session and hid a defect that made the whole upload channel unreachable for an agent |
 | `apps/worker` inbox → Orthanc for the **upload channel** | **Proven end to end**: agent opened a batch, PUT three instances (one rejected for a bad sha256 before it was stored), sealed; the worker pushed 3/3 and labelled each with the batch id; the poller read the label, attributed tenant 1 / site 1, linked the study by accession at score 1.000, and opened one clock at first-sight + 120 minutes. A zip batch exploded into its three members and labelled them the same way |
+| `apps/agent` — the thing a site installs on its own PC | Built, **103 assertions** across four modules: the settle window and its exact boundary, the two-scan `folderSignature` rule (a folder added to, a file rewritten, a listing reordered), folder→batch planning against the server's own file and byte caps with the parts numbered, the cursor round trip — including its refusal to run rather than guess when the file is unreadable or belongs to a different root —, the five retry classes in the HTTP client, and the sweep against a fake server for resume, backoff, quarantine, refusal and dry run. **Proven live in 48 assertions** (`scripts/validation/run-agent-flow.py`, driven by `run-agent-live.sh` from an empty database): real Part-10 files in a real folder, the binary run as a subprocess with a token file. It refuses cleartext and refuses `--token`; `--settle 3600` took nothing and opened no batch; the loop's first scan said `waiting for a second scan` and a later scan opened the batches; six files went in two sealed batches — one per folder — with the `README.txt` somebody left beside the images quarantined rather than dropped; `instance_count` matches the node (3 and 2, `linked=accession`); a second run over the same folders opened nothing and sent nothing; a folder that grew opened one more batch, and deleting the file did not re-open the study it came from; against an api that was not there the run exited 0, opened no batch, scheduled that folder's retry and left every already-sent folder with `failures = 0`; and the agent's own output never printed the patient-named folder it sent |
+| `apps/worker` settle stamping the node's counts (`orthanc.studyCounts`) | Built, 3 assertions on a fake port, **measured live as a defect first**: three instances arrived and the study row said two, because the ingest upsert incremented on update and never seeded on insert. `GET /studies/{pk}/statistics` was probed on the pinned 1.13.0 before it was used (`CountInstances`, `CountSeries`, `DicomDiskSize`), the insert now seeds 1, and the authoritative numbers are stamped when the node calls the study finished — with the statistics call wrapped so a node that will not answer still lets the study complete and its clock open, because the count is a fact to record and the clock is a promise to a patient |
+| `apps/api` a batch that can never be ingested | Built and **proven live**: `POST /batches/:id/seal` with nothing DICOM in it answers `422 no_dicom_files_received` **and** writes the row to `rejected` with its own `upload.batch_rejected` audit action, because leaving it `open` is the one state in this schema where a study hides — no sweep takes it and no board shows it. After a full agent run, `select count(*) from upload_batches where status='open'` is 0 |
 | `apps/api` orphan queue, manual link and unlink | **Proven live**: a second study uploaded with an accession no order carried (`ACC-NO-ORDER-777`) arrived as `orphan` inside the right tenant, `GET /v1/orphans` showed it **with the batch label as its provenance**, `POST /studies/:id/link` set it `linked`/`manual` at the **order's** priority, `unlink` returned it to the queue and deleted the clock it had not started, and relinking produced `deadline_at = received_at + 60 min` exactly. The `unlink` refusal while a radiologist holds the case (`assignment_open`) has not been exercised, because assignment is not built |
 | `apps/worker` ingest against **live Orthanc 1.13.0** (C-STORE channel) | **Proven in the P0 run**: 2 synthetic CT studies sent by C-STORE, resolved to the tenant by `RemoteAET`, linked by accession, classified `ct-head`, 2 SLA clocks opened, cursor at `since=12`; a second poll created nothing |
 | `infra/orthanc/orthanc.json` | Boots clean on 1.13.0 with authentication enforced (401 unauthenticated, 200 with the credential). `DicomAet` is not honoured — see open items |

@@ -48,7 +48,7 @@ viewer lives in this repo.
 
 | Surface | User | Content |
 | --- | --- | --- |
-| Ingest edge | center's modality or uploader | Orthanc C-STORE, watched folders, browser upload |
+| Ingest edge | center's modality or uploader | Orthanc C-STORE, and `apps/agent` — a binary the site runs on its own PC that watches the export folder, batches one folder per study, uploads each instance with its sha256, seals, resumes after a break and never deletes the source |
 | Worklist | radiologist | offers with a padlock, accept or decline-with-a-reason, lapse countdown; open the case you hold and window it — no auto-next yet |
 | Report desk | radiologist, reviewer | draft → sign → countersign → **deliver**: the signed report renders to a PDF whose SHA-256 is recorded, downloads as `telrad-<accession>-v<n>.pdf`, and moves the report to `delivered`. An amendment supersedes the version instead of editing it. The reader declares a critical finding here from a closed list and names who they told; the report cannot be released while that answer is outstanding. Release also queues a notice to the email address on the referral, which a worker sends with retries and backoff — the message carries the accession, the version and a portal link, never the findings or the patient's name |
 | Console | owner, center desk, center admin | who is routable, what is running out and who holds it, what cannot be routed and why, manual assign, what is signed and not yet released with the reason, **which critical findings are still unanswered and by how much**, and the same viewer for a case inside their own scope; tariffs, rosters, QC, invoices and payouts are still to come |
@@ -58,6 +58,7 @@ viewer lives in this repo.
     apps/api        Express + Drizzle, the only writer of clinical state
     apps/worker     ingest poller, inbox drain, study classifier, SLA clock, escalation,
                     critical-finding clocks, notification queue
+    apps/agent      the site's upload agent: watch folder → batch → sha256 → seal → resume
     apps/web        one SPA: on-panel board, reader worklist, the viewer, the report desk,
                     the critical-loop board and the unsent-notice board
     packages/db     schema, migrations, connection

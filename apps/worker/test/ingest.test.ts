@@ -11,6 +11,7 @@ type Captured = {
   cursor: number | null;
   stableAsked: string[];
   cleared: number[];
+  counts: { studyId: number; instances: number; series: number; bytes: number | null }[];
 };
 
 function instance(tags: DicomTags, over?: Partial<InstanceRead>): InstanceRead {
@@ -32,10 +33,12 @@ function fakes(opts: {
   orders?: StorePort['candidateOrders'];
   stalled?: StalledStudy[];
   stable?: boolean;
+  counts?: { instances: number; series: number; bytes: number | null } | null;
+  countsFail?: boolean;
 }) {
   const cap: Captured = {
     drafts: new Map(), firstSeen: new Map(), events: [], clocks: [], cursor: null,
-    stableAsked: [], cleared: [],
+    stableAsked: [], cleared: [], counts: [],
   };
   let nextId = 100;
 
@@ -53,6 +56,12 @@ function fakes(opts: {
     async studyStable(nodeStudyPk) {
       cap.stableAsked.push(nodeStudyPk);
       return opts.stable ?? true;
+    },
+    async studyCounts(nodeStudyPk) {
+      if (opts.countsFail) throw new Error('orthanc 500 for /studies/' + nodeStudyPk + '/statistics');
+      return opts.counts === undefined
+        ? { instances: 3, series: 1, bytes: 1234 }
+        : opts.counts;
     },
   };
 
@@ -87,6 +96,9 @@ function fakes(opts: {
       if (cap.cleared.includes(studyId)) return false;
       cap.cleared.push(studyId);
       return true;
+    },
+    async recordNodeCounts(studyId, counts) {
+      cap.counts.push({ studyId, ...counts });
     },
   };
 
@@ -286,6 +298,33 @@ describe('recheckStalled', () => {
     const r = await recheckStalled(orthanc, store, { nodeId: 'node-test' });
 
     expect(r).toMatchObject({ completed: 1, clocks: 0 });
+    expect(cap.cleared).toEqual([500]);
+  });
+
+  it('stamps the node’s own counts when a study finishes arriving', async () => {
+    // The worker's running tally counts what it processed, and on the upload channel that is a
+    // different number from what the archive holds: instances come in across batches, a re-poll
+    // after a dead connection pushes the same file, and the node deduplicates by SOP uid. This
+    // is the number a bill is answered from, so it comes from the node.
+    const { orthanc, store, cap } = fakes({
+      instances: [], stalled: [stalled()], counts: { instances: 412, series: 3, bytes: 902_000 },
+    });
+    await recheckStalled(orthanc, store, { nodeId: 'node-test' });
+    expect(cap.counts).toEqual([{ studyId: 500, instances: 412, series: 3, bytes: 902_000 }]);
+  });
+
+  it('still completes a study whose statistics call failed', async () => {
+    // A count is a fact to write down; the clock is a promise to somebody's patient.
+    const { orthanc, store, cap } = fakes({ instances: [], stalled: [stalled()], countsFail: true });
+    const r = await recheckStalled(orthanc, store, { nodeId: 'node-test' });
+    expect(r).toMatchObject({ completed: 1, clocks: 1 });
+    expect(cap.counts).toEqual([]);
+  });
+
+  it('does not invent a count when the node answered without one', async () => {
+    const { orthanc, store, cap } = fakes({ instances: [], stalled: [stalled()], counts: null });
+    await recheckStalled(orthanc, store, { nodeId: 'node-test' });
+    expect(cap.counts).toEqual([]);
     expect(cap.cleared).toEqual([500]);
   });
 

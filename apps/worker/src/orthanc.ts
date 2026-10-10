@@ -43,6 +43,17 @@ export type OrthancReader = {
    * flip, so a poller that only reads what `/changes` reports would leave the study
    * flagged incomplete forever. That is why `recheckStalled` has to ask. */
   studyStable(nodeStudyPk: string): Promise<boolean>;
+  /**
+   * What the node says the study holds. Measured on the pinned 1.13.0 at
+   * `GET /studies/{pk}/statistics` → `CountInstances`, `CountSeries`, `DicomDiskSize`.
+   *
+   * This is the number that belongs on the archive row: instances can arrive across several
+   * batches, be re-pushed after a failed poll, or be deduplicated by the node on SOP instance
+   * uid, and only the node knows what ended up stored. Null when the answer has no count in it.
+   */
+  studyCounts(nodeStudyPk: string): Promise<{
+    instances: number; series: number; bytes: number | null;
+  } | null>;
 };
 
 const str = (v: unknown): string | undefined => {
@@ -146,6 +157,19 @@ export function createOrthancReader(opts: { baseUrl: string; user: string; passw
     async studyStable(nodeStudyPk) {
       const stu = await json<{ IsStable: boolean }>(`/studies/${nodeStudyPk}`);
       return stu.IsStable === true;
+    },
+
+    async studyCounts(nodeStudyPk) {
+      const s = await json<{ CountInstances?: number; CountSeries?: number; DicomDiskSize?: string }>(
+        `/studies/${nodeStudyPk}/statistics`,
+      );
+      if (typeof s.CountInstances !== 'number') return null;
+      return {
+        instances: s.CountInstances,
+        series: typeof s.CountSeries === 'number' ? s.CountSeries : 0,
+        bytes: typeof s.DicomDiskSize === 'string' && /^\d+$/.test(s.DicomDiskSize)
+          ? Number(s.DicomDiskSize) : null,
+      };
     },
   };
 }

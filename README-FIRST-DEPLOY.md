@@ -225,6 +225,70 @@ print(json.load(urllib.request.urlopen(urllib.request.Request(
   headers={'Authorization':'Basic '+b})))"
 ```
 
+## 7b. Run the upload agent, which is the thing a site installs on its own machine
+
+`run-p1-flow.py` above behaves perfectly. A center's CT console does not: it writes into a folder
+while the scan is finishing, its share drops its handle, the machine reboots nightly, and the
+person standing next to it is a radiographer, not an operator. `apps/agent` is the binary that
+lives there.
+
+```bash
+pnpm --filter @telrad/agent build          # writes apps/agent/dist
+
+printf '%s' '<the token from POST /v1/sites/:id/tokens>' > /etc/telrad/agent-token   # mode 600
+node apps/agent/dist/main.js \
+  --watch /mnt/modality-export \
+  --api https://telrad.<your-domain>:8443 \
+  --token-file /etc/telrad/agent-token \
+  --hints '{accession}-{date}' \
+  --interval 20
+```
+
+Run it once first, and read what it says it would do:
+
+```bash
+node apps/agent/dist/main.js --watch /mnt/modality-export --api https://telrad.<your-domain>:8443 \
+  --token-file /etc/telrad/agent-token --dry-run --once
+```
+
+Five things about its behaviour are decisions, not defaults to tune:
+
+- **it deletes nothing.** The export folder stays the center's copy until the archive confirms the
+  study; the agent keeps `telrad-agent-state.json` beside the folder instead. If you want files
+  moved out of it, do that on a schedule you control, after the study is linked.
+- **it takes a folder when two scans agree**, and only after every file in it is older than
+  `--settle` (60s). A folder that is still being written is left for the next pass. `--once` (for
+  cron) has no second scan, so there the settle window carries it alone — widen it if you schedule
+  the agent every five minutes.
+- **a folder is a study.** One directory becomes one batch; a study bigger than the server's cap is
+  split into numbered parts rather than refused. Nested folders are separate studies.
+- **a half-sent study resumes, it does not start again.** If the network dies mid-folder, the same
+  batch id is filled and sealed on the next pass, and the files already on the server are not
+  uploaded twice. Failures back off per folder (5, 15, 60, 300, 900 seconds) rather than retrying
+  every interval against an api that is down.
+- **its log does not contain the folder name.** Export folders are routinely named after the
+  patient, and this log is the file somebody attaches to a support email. `--log-names` is the
+  opt-in for debugging your own machine. `--hints` has three tokens — `{accession}`, `{date}`,
+  `{modality}` — and there is deliberately no patient or MRN token; a folder name that does not
+  validate against the template simply sends no hint, because a wrong accession would attach the
+  images to somebody else's order and a missing one only means the images wait in the orphan queue.
+
+The credential never goes on the command line: `--token` is refused, because argv is readable by
+every other account on a shared workstation and lands in shell history. Use `--token-file` (mode
+600) or `TELRAD_AGENT_TOKEN`. The agent also refuses an `http://` api unless you pass
+`--allow-insecure-http`, because that token rides on every request.
+
+Prove the whole thing end to end on a throwaway stack, from an empty database:
+
+```bash
+bash scripts/validation/run-agent-live.sh            # and --keep to leave it up
+```
+
+It generates two real studies — one folder named like an accession, one named like a patient —
+and asserts the settle gate, the two-scan rule, the resume, the `README.txt` that came with the
+export being quarantined rather than dropped, a dead api leaving nothing duplicated, and the
+linked study's `instance_count` matching what the node reports.
+
 ## 8. Run the console
 
 The board is a static build, and Caddy serves it from `apps/web/dist` on the same
@@ -476,10 +540,16 @@ DPDP envelope. Not built either: billing and payouts, and any pager — `alert_o
 has no hanging protocols, no MPR, no measurement or annotation tools, no cine, and shows one
 series at a time; it is enough to look at a study and not enough to sign one in a reading
 room that expects those tools.
-The upload *endpoints* exist and are proven; the *agent* a center installs on its modality
-PC to call them does not, so today that channel only works for a browser upload or a
-script. README at the root lists the phase plan; docs/ARCHITECTURE.md states what exists,
-including the open items it names: **a declined case is never asked again**, **a widened
+The upload *agent* exists (`apps/agent`) and is proven against this stack's own api from a real
+watch folder of real Part-10 files — see §7 for the command. What has not been done to it is the
+list that matters before a center relies on it: it has never run against a modality's actual export
+folder (those names are invented by the vendor's software, and the `--hints` template is the
+operator's way of telling the agent what convention it found), never run for the weeks-long
+unattended stretch a NAS-to-cloud deployment expects, never packaged as a Windows service or an
+installer, and never talked to a real TLS endpoint — every assertion here passed `
+--allow-insecure-http` because the validation api is loopback cleartext. README at the root lists
+the phase plan; docs/ARCHITECTURE.md states what exists, including the open items it names:
+**a declined case is never asked again**, **a widened
 offer has no ceiling**, **nothing escalates a report that is waiting for its second name**
 (it is listed, blocked and visible, but untimed), the delivered document is regenerated rather
 than stored, the viewer ships text-shaped pixels and their byte cost, and frames are not

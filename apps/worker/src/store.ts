@@ -153,6 +153,10 @@ export function createStore(db: Db, nodeId: string): StorePort {
           receivedAt: draft.receivedAt,
           classification: draft.classification,
           qualityFlags: draft.qualityFlags,
+          // The instance that created the row is an instance. Leaving these out and letting the
+          // update branch add from zero is what made every study on this channel one short.
+          instanceCount: 1,
+          bytes: draft.instanceBytes ?? 0,
         })
         .onConflictDoUpdate({
           target: [studies.storageNodeId, studies.studyInstanceUid],
@@ -232,6 +236,18 @@ export function createStore(db: Db, nodeId: string): StorePort {
         ))
         .returning({ id: studies.id });
       return rows.length > 0;
+    },
+
+    async recordNodeCounts(studyId, counts) {
+      await db.update(studies)
+        .set({
+          instanceCount: counts.instances,
+          seriesCount: counts.series,
+          // Only overwritten when the node gave a number: a null here would erase the size of a
+          // study that is otherwise perfectly filed.
+          ...(counts.bytes === null ? {} : { bytes: counts.bytes }),
+        })
+        .where(eq(studies.id, studyId));
     },
   };
 }

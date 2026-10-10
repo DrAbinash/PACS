@@ -174,6 +174,15 @@ export function uploadsRouter(db: Db, inboxRoot: string): Router {
     }).from(uploadFiles).where(eq(uploadFiles.batchId, batchId));
     const stored = counts[0]?.stored ?? 0;
     if (stored === 0) {
+      // Nothing in it is an image, so it can never be ingested. Leaving it `open` would be a
+      // zombie no sweep will ever pick up and no screen explains; `rejected` is the truth, and it
+      // is written before the refusal so the answer and the row cannot disagree.
+      await db.update(uploadBatches).set({ status: 'rejected' }).where(eq(uploadBatches.id, batchId));
+      await appendAudit(db, {
+        actorUserId: who.actorUserId, actorKind: who.channel === 'agent' ? 'service' : 'human',
+        tenantId: batch.tenantId, action: 'upload.batch_rejected', entity: 'upload_batches',
+        entityId: batchId, detail: { reason: 'no_dicom_files_received', ...counts[0] },
+      });
       return res.status(422).json({ ok: false, error: 'no_dicom_files_received', ...counts[0] });
     }
 

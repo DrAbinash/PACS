@@ -54,6 +54,12 @@ export type StorePort = {
   /** Drops the 'study_not_complete' flag and nothing else. False when the flag was
    * already gone, which is what keeps a concurrent re-check from doubling the clock. */
   clearStalledFlag(studyId: number): Promise<boolean>;
+  /** The node's own counts, written when a study is called finished. The worker's running
+   * tally is a count of what it processed; this is a statement about what the archive holds,
+   * and it is the one a bill and an audit question both have to be answered from. */
+  recordNodeCounts(studyId: number, counts: {
+    instances: number; series: number; bytes: number | null;
+  }): Promise<void>;
 };
 
 export type StalledStudy = {
@@ -234,6 +240,20 @@ export async function recheckStalled(
 
     if (!(await store.clearStalledFlag(row.id))) continue;
     r.completed += 1;
+
+    // Ask the node what it holds, now that the study is finished arriving. The running tally
+    // the ingest path keeps is a count of what this worker processed, and the two are not the
+    // same number: instances arrive across batches, a re-poll after a dead connection pushes
+    // the same file again, and the node deduplicates by SOP instance uid. Measured live on the
+    // upload channel, where a three-instance study had been filed as two and a two-instance
+    // study as one. A statistics call that fails is not allowed to stop the study being
+    // completed or its clock opening — the count is a fact to record, the clock is a promise.
+    try {
+      const counts = await orthanc.studyCounts(row.nodePk);
+      if (counts !== null) await store.recordNodeCounts(row.id, counts);
+    } catch {
+      // Left as the tally the ingest path accumulated.
+    }
 
     // The clock opens from first sight, exactly as it does on the ingest path, so a
     // study that took two minutes to settle is not given those two minutes back.
