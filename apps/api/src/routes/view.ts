@@ -1,6 +1,6 @@
 import { and, eq, inArray } from 'drizzle-orm';
 import { type Db, appendAudit, assignments, patients, reports, studies, storageNodes } from '@telrad/db';
-import { currentVersion, frameToBytes, mayReadReport, parseMatlabFrame, tagValue } from '@telrad/shared';
+import { currentVersion, decodePng16, frameToBytes, mayReadReport, parseMatlabFrame, tagValue } from '@telrad/shared';
 import { Router, type Response } from 'express';
 import { OrthancError, type OrthancClient } from '../orthanc.js';
 import { requireAuth, requireRole, scoped, scopeTenant, type Ctx } from '../auth.js';
@@ -323,36 +323,42 @@ export function viewRouter(db: Db, orthanc: OrthancClient): Router {
     if (!auth.row || auth.status !== 200) return denied(res, auth.status);
     const row = auth.row;
 
-    let text: string;
+    let pngBuf: Uint8Array;
     try {
       const tree = await treeFor(studyId, row.baseUrl, row.nodePk!);
       if (!belongsTo(tree, instancePk)) {
         return res.status(404).json({ ok: false, error: 'not_in_this_study' });
       }
-      // The only endpoint on this build that answers with stored values rather than a
-      // rendered picture; `/frames/{i}/image-uint8` was measured to ignore every window
-      // parameter, so it cannot be the source of a changeable image.
-      text = await orthanc.nodeText(row.baseUrl, `/instances/${instancePk}/frames/${frameIndex}/matlab`);
+      // `/frames/{i}/image-int16` returns a 16-bit PNG — roughly 500× smaller than the
+      // `matlab` text endpoint for a 512×512 slice. The node was measured to ignore every
+      // window parameter on its rendering endpoints, so the pixels must cross as numbers
+      // and the window is computed in the browser; but they can cross as a compressed PNG
+      // rather than as text-shaped numbers.
+      pngBuf = await orthanc.nodeBytes(row.baseUrl, `/instances/${instancePk}/frames/${frameIndex}/image-int16`);
     } catch (err) {
       return refuse(res, err, studyId);
     }
 
-    const frame = parseMatlabFrame(text);
-    if (!frame) {
-      // A frame with no numbers is a real state — a localizer or a dose report stored
+    const decoded = decodePng16(pngBuf);
+    if (!decoded) {
+      // A frame with no pixels is a real state — a localizer or a dose report stored
       // without pixel data — and it must arrive as a refusal, not as a black image a
       // reader would otherwise have to interpret.
       return res.status(422).json({ ok: false, error: 'no_pixels_in_frame' });
     }
-    if (frame.overflowSeen) {
-      return res.status(422).json({ ok: false, error: 'frame_not_16_bit' });
-    }
+
+    // The PNG decoder yields big-endian 16-bit values; convert to Int16Array for the
+    // viewer, which expects signed or unsigned 16-bit based on PixelRepresentation.
+    const values = new Int16Array(decoded.pixels.buffer, decoded.pixels.byteOffset, decoded.pixels.length);
+    const negativeSeen = decoded.pixels.some((v) => v >= 0x8000);
 
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('X-Telrad-Pixel-Format', 'int16-le');
-    res.setHeader('X-Telrad-Pixel-Count', String(frame.values.length));
+    res.setHeader('X-Telrad-Pixel-Count', String(values.length));
     // Patient data, and a cached frame would outlive the assignment that made it readable.
     res.setHeader('Cache-Control', 'no-store');
+    // Convert to little-endian bytes for the browser.
+    const frame = { values, negativeSeen, overflowSeen: false };
     res.send(Buffer.from(frameToBytes(frame)));
   }));
 

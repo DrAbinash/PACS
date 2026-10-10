@@ -18,6 +18,7 @@ export type OrthancClient = {
   /** Node-scoped reads, for a study whose storage node is not the deployment default. */
   nodeJson: <T>(baseUrl: string, path: string) => Promise<T>;
   nodeText: (baseUrl: string, path: string) => Promise<string>;
+  nodeBytes: (baseUrl: string, path: string) => Promise<Uint8Array>;
 };
 
 export function createOrthancClient(env: Env['orthanc']): OrthancClient {
@@ -68,5 +69,9 @@ export function createOrthancClient(env: Env['orthanc']): OrthancClient {
     // is CPU work on the same box that holds the archive. Twenty seconds, and no retry:
     // a reader who scrolls again while this is in flight is the retry.
     nodeText: async (baseUrl: string, path: string) => (await fetchOne(baseUrl, path, 20_000)).text(),
+    // A 16-bit PNG frame: the compressed bytes, not text-shaped numbers. Roughly 500×
+    // smaller than the matlab endpoint for a 512×512 slice.
+    nodeBytes: async (baseUrl: string, path: string) =>
+      new Uint8Array(await (await fetchOne(baseUrl, path, 20_000)).arrayBuffer()),
   };
 }

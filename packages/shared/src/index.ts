@@ -9,5 +9,6 @@ export * from './criticals.js';
 export * from './notify.js';
 export * from './money.js';
 export * from './pixels.js';
+export * from './png.js';
 export * from './audit.js';
 export * from './validate.js';
