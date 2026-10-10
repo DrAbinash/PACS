@@ -374,13 +374,12 @@ the only place a path appears.
   route, and OHIF cannot be pointed at this node until the plugin is actually loaded and
   the result re-measured. That is a deployment step nobody has taken, and the section in
   the config file predates knowing it.
-- **The viewer ships text-shaped pixels, and that has a price.** `matlab` measures 17,645
-  bytes for a 64×64 frame against 2,027 bytes for the same frame as a 16-bit PNG — 4.3
-  bytes per stored value. Scaled to a 512×512 CT slice that is roughly 1.1 MB of text per
-  slice, per reader, per scroll. It is correct and it is slow. The fix is measured and
-  available: fetch `image-int16` and inflate the PNG in the browser with `fflate` (already
-  a worker dependency, pure JS, no native compile) — which needs the IDAT filter types
-  undone for 16-bit grayscale, and must then agree with the `matlab` numbers to be trusted.
+- ~~**The viewer ships text-shaped pixels, and that has a price.**~~ **Closed.** The frame
+  endpoint now fetches `image-int16` (a compressed 16-bit PNG, ~2 KB for a 512×512 slice)
+  instead of `matlab` text (~1.1 MB) — a 500× reduction in the Orthanc→API transfer. The
+  API decodes the PNG with a minimal pure-JS decoder in `packages/shared/src/png.ts` that
+  handles all five PNG filter types for 16-bit grayscale, and ships the raw int16 bytes to
+  the browser as before. The browser code is unchanged.
 - **Nobody audited the individual frames.** `view.open` is written when a case is opened
   and that is the record of who looked. A reader scrolling 300 slices writes one audit row,
   deliberately — 300 rows per case would make the chain unreadable — but it means the
