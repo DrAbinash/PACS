@@ -1,7 +1,7 @@
 import { and, asc, desc, eq, gte, or, sql } from 'drizzle-orm';
 import type { Db } from '@telrad/db';
 import {
-  appendAudit, invoiceLines, invoices, modalities, reports, subSpecialties, tariffs, tenants, studies,
+  appendAudit, invoiceLines, invoices, modalities, subSpecialties, tariffs, tenants,
 } from '@telrad/db';
 import {
   cleanText,

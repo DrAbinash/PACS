@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  draftLines, financialYear, invoiceNumber, lineAmount, lineDescription, PAISE_PER_RUPEE,
+  draftLines, financialYear, invoiceNumber, lineAmount, PAISE_PER_RUPEE,
   periodsOverlap, pickTariff, periodBounds, rupeesOf, toPaise, totals,
   type BillableStudy, type TariffRow,
 } from '../src/money.js';
