@@ -436,13 +436,12 @@ the only place a path appears.
   just refused it — and the manual assign exists to be the way out. What is missing is
   the other way out: nothing re-offers it after the reader's own queue empties, so a
   decline at 1 a.m. needs a human awake at the board.
-- **A widened offer has no ceiling.** `widen_pool` lets an at-capacity reader take one
-  more case, and in the live run the same chest reader ended up holding three accepted
-  studies against the one-slot queue they had declared — one ordinary offer, one widened
-  offer and one manual assign, each of which checked coverage and presence and none of
-  which checked a limit. An over-capacity queue is a clinical risk and the number needs a
-  stated maximum (one over? two over? never for STAT?) before a real reader is on it.
-  `assignments_live_lock_uq` will happily let it keep happening.
+- ~~**A widened offer has no ceiling.**~~ **Closed.** `MAX_OVER_CAPACITY = 1` in
+  `packages/shared/src/dispatch.ts` caps a widened queue at one over the declared maximum.
+  A reader holding three studies against a one-slot declaration is not "busy", they are a
+  bottleneck that cannot be seen, and STAT cases do not get a second over because a case
+  that cannot wait also cannot wait for a reader who is already past what they said they
+  could handle.
 - **A router mounted at `/v1` guards paths it does not own.** `r.use(requireAuth)`
   inside such a router runs for *every* `/v1/...` request, so a radiologist polling
   `/v1/presence` was answered 403 by the sites router's owner-only check, and an agent
@@ -450,9 +449,10 @@ the only place a path appears.
   `scoped()` in `apps/api/src/auth.ts`, which applies a guard only to the path prefixes
   that router declares. Mount order is no longer load-bearing, but a new router must
   still list its own prefixes — forgetting that reintroduces the bug silently.
-- **An unknown `/v1/...` path answers with Express's HTML 404, not JSON.** Harmless
-  today — the console shows "feed lost" — but every other failure mode in this API
-  speaks JSON, and a client should not have to special-case one.
+- ~~**An unknown `/v1/...` path answers with Express's HTML 404, not JSON.**~~ **Closed.**
+  `app.use('/v1/*', ...)` in `apps/api/src/app.ts` answers with `{ ok: false, error: 'not_found' }`
+  before the error handler runs. Every other failure mode in this API speaks JSON, and a
+  client should not have to special-case one.
 
 - **A study that arrives on the upload channel is attributed by an Orthanc label, and
   Orthanc's label rules are load-bearing.** The write verb is `PUT
