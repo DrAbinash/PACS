@@ -7,6 +7,7 @@ export * from './escalation.js';
 export * from './report.js';
 export * from './criticals.js';
 export * from './notify.js';
+export * from './money.js';
 export * from './pixels.js';
 export * from './audit.js';
 export * from './validate.js';

@@ -341,6 +341,60 @@ export type DeliveryItem = {
   openCriticals: number;
 };
 
+export type Invoice = {
+  id: number;
+  number: string;
+  status: 'draft' | 'issued';
+  periodStart: string;
+  periodEnd: string;
+  grossPaise: number;
+  taxPaise: number;
+  totalPaise: number;
+  totalRupees: string;
+  issuedAt: string | null;
+  lineCount: number;
+};
+
+export type InvoiceLine = {
+  id: number;
+  studyId: number;
+  description: string;
+  modalityCode: string | null;
+  tariffCode: string | null;
+  quantity: number;
+  unitPaise: number;
+  night: boolean;
+  amountPaise: number;
+};
+
+export type InvoiceDetail = {
+  invoice: Invoice;
+  lines: InvoiceLine[];
+};
+
+export type PreviewLine = {
+  studyId: number;
+  description: string;
+  modalityCode: string | null;
+  tariffCode: string | null;
+  quantity: number;
+  unitPaise: number;
+  night: boolean;
+  amountPaise: number;
+};
+
+export type PreviewResult = {
+  ok: boolean;
+  periodStart: string;
+  periodEnd: string;
+  lines: PreviewLine[];
+  unpriced: { studyId: number; reason: string }[];
+  grossPaise: number;
+  taxPaise: number;
+  totalPaise: number;
+  totalRupees: string;
+};
+
 export const api = {
   session: () => call<Session>('/v1/auth/session'),
   login: (email: string, password: string) =>
@@ -431,6 +485,30 @@ export const api = {
   // Not a fetch: the browser takes the bytes and honours the Content-Disposition the route
   // sets, so the filename is decided by the server that knows the accession.
   pdfHref: (id: number) => `/v1/reports/${id}/pdf`,
+
+  // Billing: the operator's view of what the center earned and what the clinic owes.
+  invoices: (tenantId: number) =>
+    call<{ ok: boolean; invoices: Invoice[] }>(`/v1/billing/invoices?tenantId=${tenantId}`),
+  invoice: (id: number) =>
+    call<{ ok: boolean; invoice: Invoice; lines: InvoiceLine[] }>(`/v1/billing/invoices/${id}`),
+  previewBilling: (tenantId: number, periodStart: string, periodEnd: string) =>
+    call<PreviewResult>('/v1/billing/preview', {
+      method: 'POST',
+      body: JSON.stringify({ tenantId, periodStart, periodEnd }),
+    }),
+  createInvoice: (tenantId: number, periodStart: string, periodEnd: string) =>
+    call<{ ok: boolean; invoice: Invoice; lines: InvoiceLine[] }>('/v1/billing/invoices', {
+      method: 'POST',
+      body: JSON.stringify({ tenantId, periodStart, periodEnd }),
+    }),
+  issueInvoice: (id: number) =>
+    call<{ ok: boolean; invoice: Invoice }>(`/v1/billing/invoices/${id}/issue`, {
+      method: 'POST',
+      body: '{}',
+    }),
+  deleteInvoice: (id: number) =>
+    call<{ ok: boolean; dropped: boolean }>(`/v1/billing/invoices/${id}`, { method: 'DELETE' }),
+  invoiceCsvHref: (id: number) => `/v1/billing/invoices/${id}/export.csv`,
 };
 
 async function frame(studyId: number, pk: string, index: number): Promise<ArrayBuffer> {

@@ -17,7 +17,7 @@ import { ah, errorHandler } from '../src/handler.js';
 const REGISTRATION = /^\s*\w+\.(get|post|put|patch|delete)\(/;
 const ROUTE = /^\s*\w+\.(get|post|put|patch|delete)\(\s*'([^']+)'/;
 
-type Declared = { method: string; path: string; parent: string; param: boolean; n: number };
+type Declared = { method: string; path: string; parent: string; param: boolean; last: string; n: number };
 
 // A literal path at the same depth under the same parent, declared after a parameter path,
 // can never be reached: `:id` matched it first.
@@ -26,6 +26,19 @@ const unreachableAfter = (literal: Declared, param: Declared): boolean =>
   && literal.parent === param.parent
   && !literal.param && param.param
   && literal.n > param.n;
+
+// A parameter path also matches a *longer* segment that begins with the same characters, because
+// `:id` is `[^/]+` and `7.csv` is one segment. So `/billing/invoices/:id`, declared first, would
+// have made `/billing/invoices/:id.csv` unreachable and turned the export link into a `Number()`
+// of `NaN` against an integer column. The fix was a separate path segment; this is the guard that
+// keeps the next person from putting the suffix back.
+const swallowedByParamPrefix = (earlier: Declared, later: Declared): boolean =>
+  earlier.method === later.method
+  && earlier.parent === later.parent
+  && earlier.param && later.param
+  && earlier.n < later.n
+  && later.last.startsWith(earlier.last)
+  && later.last !== earlier.last;
 
 // Two failures in this repository came from Express matching a parameter path before the
 // literal one declared after it — `/reports/awaiting-review` answered 400 `bad_id`, and the
@@ -47,6 +60,7 @@ function shadowedRoutes(text: string): string[] {
       path: routePath,
       parent: segments.slice(0, -1).join('/'),
       param: last.startsWith(':'),
+      last,
       n: i + 1,
     });
   });
@@ -56,6 +70,9 @@ function shadowedRoutes(text: string): string[] {
     for (const literal of declared) {
       if (unreachableAfter(literal, param)) {
         problems.push(`${param.path} (line ${param.n}) swallows ${literal.path} (line ${literal.n})`);
+      }
+      if (swallowedByParamPrefix(param, literal)) {
+        problems.push(`${param.path} (line ${param.n}) also matches ${literal.path} (line ${literal.n})`);
       }
     }
   }
@@ -124,6 +141,15 @@ describe('the route surface of the API', () => {
       "r.get('/reports/:id', ah(async (_req, res) => res.end()));",
       "r.get('/reports/:id/pdf', ah(async (_req, res) => res.end()));",
     ].join('\n'))).toEqual([]);
+
+    // The suffix shape, measured against the file that had it: `/billing/invoices/:id.csv`
+    // declared after `/billing/invoices/:id` is dead code, and the guard has to say so.
+    expect(shadowedRoutes([
+      "r.get('/billing/invoices/:id', ah(async (_req, res) => res.end()));",
+      "r.get('/billing/invoices/:id.csv', ah(async (_req, res) => res.end()));",
+    ].join('\n'))).toEqual([
+      '/billing/invoices/:id (line 1) also matches /billing/invoices/:id.csv (line 2)',
+    ]);
   });
 });
 

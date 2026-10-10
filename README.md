@@ -5,7 +5,7 @@ distribute to contracted radiologists reading from anywhere, reports come back
 signed by two names and are billed per center.
 
 **Status: P1 channels proven; the panel routes, the clock escalates, a reader can open the
-case they accepted and sign a report for it.** A study can arrive by C-STORE or by an upload
+case they accepted and sign a report for it, and the center gets an invoice.** A study can arrive by C-STORE or by an upload
 batch from a center's agent token, be attributed to its tenant, linked to its order, and carry
 an SLA clock; a study that matches nothing waits in the orphan queue where a person can link
 it. The console shows which readers are routable right now, and the dispatcher offers a case
@@ -25,8 +25,13 @@ releases it, the PDF renders deterministically and its SHA-256 is recorded besid
 row, and the report reaches `delivered`. A critical finding is a second gate on that release —
 the reader declares it from a closed list and names who they telephoned, and the report cannot
 go to the clinic until somebody at the referring end is recorded as having answered it, with the
-worker stamping a breach when nobody does.
-There is still no money, nothing pages a person when a case cannot be routed and nothing phones
+worker stamping a breach when nobody does. Delivered studies are priced at the tariff in force
+on the day the report was delivered, one line per study however many versions were delivered,
+and the invoice is numbered in an unbroken financial-year sequence per tenant. A study with no
+tariff is named as unpriced rather than quietly dropped. Night readings carry a premium, and
+the description says so plainly. The operator's billing panel shows the preview, the draft, the
+issued invoices, and the CSV export.
+There is still nothing pages a person when a case cannot be routed and nothing phones
 the clinic when a finding is critical — "alert" today means an audit row and the board, and the
 acknowledgement loop records a call rather than making one. No message is sent to a referring
 clinic that has no login. The viewer is a grayscale
@@ -51,7 +56,7 @@ viewer lives in this repo.
 | Ingest edge | center's modality or uploader | Orthanc C-STORE, and `apps/agent` — a binary the site runs on its own PC that watches the export folder, batches one folder per study, uploads each instance with its sha256, seals, resumes after a break and never deletes the source |
 | Worklist | radiologist | offers with a padlock, accept or decline-with-a-reason, lapse countdown; open the case you hold and window it — no auto-next yet |
 | Report desk | radiologist, reviewer | draft → sign → countersign → **deliver**: the signed report renders to a PDF whose SHA-256 is recorded, downloads as `telrad-<accession>-v<n>.pdf`, and moves the report to `delivered`. An amendment supersedes the version instead of editing it. The reader declares a critical finding here from a closed list and names who they told; the report cannot be released while that answer is outstanding. Release also queues a notice to the email address on the referral, which a worker sends with retries and backoff — the message carries the accession, the version and a portal link, never the findings or the patient's name |
-| Console | owner, center desk, center admin | who is routable, what is running out and who holds it, what cannot be routed and why, manual assign, what is signed and not yet released with the reason, **which critical findings are still unanswered and by how much**, and the same viewer for a case inside their own scope; tariffs, rosters, QC, invoices and payouts are still to come |
+| Console | owner, center desk, center admin | who is routable, what is running out and who holds it, what cannot be routed and why, manual assign, what is signed and not yet released with the reason, **which critical findings are still unanswered and by how much**, and the same viewer for a case inside their own scope; **billing — tariffs, preview, draft, issue, CSV export**; rosters and QC are still to come |
 
 ## Layout
 

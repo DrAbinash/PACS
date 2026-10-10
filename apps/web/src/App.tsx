@@ -17,6 +17,7 @@ import {
 
 import Viewer from './Viewer';
 import { CriticalBoard } from './Critical';
+import { Billing } from './Billing';
 import { explainCode, retryLabel } from './Report';
 
 const HEARTBEAT_MS = 20_000;
@@ -707,6 +708,8 @@ export default function App() {
         {isDesk && <NoticeQueue show={isDesk} canOpen={isOperator} onOpen={setOpenStudy} />}
 
         {isOperator && <Waiting show={isOperator} onOpen={setOpenStudy} />}
+
+        {isOperator && session.user.tenantId !== null && <Billing tenantId={session.user.tenantId} />}
 
         {counts.green === 0 && !feedError && (
           <div className="banner">Nobody is routable right now. Anything waiting will wait.</div>

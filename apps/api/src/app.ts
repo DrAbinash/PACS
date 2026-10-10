@@ -13,6 +13,7 @@ import { LINK_STATES, hashToken, newToken, verifyPassword, type LinkState } from
 import express, { type Express, type Router } from 'express';
 import { ah, errorHandler } from './handler.js';
 import { COOKIE, readCookie, requireAuth, scopeTenant, type Ctx } from './auth.js';
+import { billingRouter } from './routes/billing.js';
 import { clinicalRouter } from './routes/clinical.js';
 import { criticalsRouter } from './routes/criticals.js';
 import { orphansRouter } from './routes/orphans.js';
@@ -244,6 +245,7 @@ export function createApp(deps: AppDeps): Express {
   app.use('/v1', viewRouter(db, orthanc));
   app.use('/v1', reportsRouter(db));
   app.use('/v1', criticalsRouter(db));
+  app.use('/v1', billingRouter(db));
 
   // Mounted last: this is the only responder for anything that reached `next` with
   // an error, and it is what keeps a rejected database read from becoming a dead

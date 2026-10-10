@@ -180,3 +180,19 @@ a.link { color: var(--text); font-size: 13px; text-decoration: underline; white-
 .critical.acknowledged { border-left-color: var(--green); }
 .declare { display: grid; gap: 8px; margin-top: 10px; }
 .declare .row { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* Billing: the operator's money board. An invoice is the one document that leaves the
+   platform and lands on a center's accounts desk, so the arithmetic has to be plain — the
+   sum of the lines above it, the tariff that priced each row, and the night premium when
+   it applied. A draft can be previewed, created, issued, or dropped; an issued invoice
+   cannot be changed, only corrected by a later amendment. */
+.billing-preview { margin-bottom: 16px; }
+.billing-period { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.billing-period input { background: #0e141c; border: 1px solid var(--line); color: var(--text); border-radius: 8px; padding: 7px 10px; font: inherit; }
+.billing-preview-result, .billing-detail { margin-top: 14px; }
+table tfoot td { border-top: 2px solid var(--line); font-weight: 600; }
+tbody tr.selected { background: #1a2532; }
+button.link { background: none; border: none; color: var(--text); padding: 0; text-decoration: underline; cursor: pointer; }
+button.link:hover { color: var(--green); }
+a.link { color: var(--text); text-decoration: underline; }
+a.link:hover { color: var(--green); }
