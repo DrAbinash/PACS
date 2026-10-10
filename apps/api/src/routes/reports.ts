@@ -241,6 +241,13 @@ export function reportsRouter(db: Db): Router {
       supersededByVersion: supersededByOf(history, row.id),
       amendmentReason: row.amendmentReason,
       createdAt: row.createdAt,
+      // An amendment's turnaround is the time from when v(n+1) was created to when it was
+      // signed. The data is already on the row (signedAt - createdAt for rows where
+      // supersedesReportId is not null), but surfacing it here means a contract that prices
+      // corrections can read the number without deriving it from two timestamps.
+      amendmentTurnaroundMinutes: row.supersedesReportId !== null && row.signedAt !== null
+        ? Math.round((row.signedAt.getTime() - row.createdAt.getTime()) / 60000)
+        : null,
       gaps: missingSections(row.sections),
       // Computed for the caller, not for the document. A generic "this state allows a
       // countersignature" would light up the button on the author's own screen, where the
@@ -480,6 +487,8 @@ export function reportsRouter(db: Db): Router {
       authorName: reports.authorName,
       authorGrade: clinicianProfiles.grade,
       signedAt: reports.signedAt,
+      createdAt: reports.createdAt,
+      supersedesReportId: reports.supersedesReportId,
       accession: studies.accessionNumber,
       modality: studies.modalityCode,
       requiresReviewer: subSpecialties.requiresReviewer,
@@ -497,6 +506,7 @@ export function reportsRouter(db: Db): Router {
     // The grade test is per row and the reviewer's own grade may be missing, so it is
     // computed here rather than in SQL: a junior must still see the queue, and see plainly
     // which entries they cannot clear.
+    const now = new Date();
     const out = rows.map((row) => {
       const decision = countersignDecision({
         state: 'signed',
@@ -505,8 +515,20 @@ export function reportsRouter(db: Db): Router {
         authorGrade: row.authorGrade,
         reviewerGrade: me?.grade ?? null,
       });
+      // The query filters by state='signed', so signedAt is always present. The schema
+      // allows null because a draft has not been signed yet, but that row never reaches
+      // this map.
+      const signedAt = row.signedAt!;
       return {
         ...row,
+        // How long this report has been waiting for a second name, in minutes. A reviewer
+        // staring at a queue needs to see which row has been sitting there since 02:13, not
+        // just the order it arrived in.
+        waitingMinutes: Math.round((now.getTime() - signedAt.getTime()) / 60000),
+        // An amendment waiting for review is a different thing from a first signature: the
+        // center was already answered, and this is a correction. The reviewer needs to know
+        // because an amendment carries a different urgency than a first read.
+        isAmendment: row.supersedesReportId !== null,
         mayClear: decision.ok,
         reason: decision.ok ? null : decision.reason,
       };

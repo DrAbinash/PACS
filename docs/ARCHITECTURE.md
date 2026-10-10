@@ -421,7 +421,12 @@ the only place a path appears.
   become a breach the dispatcher widens a pool for. The cost: there is no column for the time
   from "amendment requested" to "amendment signed", so if a contract ever prices corrections,
   that number has to be captured at the time rather than derived afterwards from the audit
-  trail.
+  trail. **Closed.** The turnaround is now exposed in the API: `GET /v1/reports/:id` returns
+  `amendmentTurnaroundMinutes` for amendment rows (computed as `signedAt - createdAt`), and
+  `GET /v1/reports/awaiting-review` returns `waitingMinutes` (how long a signed report has
+  been waiting for a second name) and `isAmendment` (whether the row is a correction rather
+  than a first read). The data was already on the row; surfacing it means a contract that
+  prices corrections can read the number without deriving it from two timestamps.
 - **Report text is five fixed sections.** Findings and Impression must carry words; clinical
   history, technique and recommendation are optional. No per-sub-specialty templates, no
   dictation, and the `structured` jsonb column exists with nothing writing it. The `typist`
