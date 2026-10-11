@@ -49,6 +49,7 @@ export const tenants = telrad.table('tenants', {
   contactEmail: text('contact_email'),
   contactPhone: text('contact_phone'),
   signatureLine: text('signature_line'),
+  prepaidBalancePaise: integer('prepaid_balance_paise').notNull().default(0),
   createdAt: at('created_at'),
 }, (t) => ({
   codeUq: uniqueIndex('tenants_code_uq').on(t.code),
@@ -449,6 +450,8 @@ export const reports = telrad.table('reports', {
   supersedesReportId: integer('supersedes_report_id'),
   amendmentReason: text('amendment_reason'),
   pdfSha256: text('pdf_sha256'),
+  actionNeeded: boolean('action_needed').notNull().default(false),
+  actionNeededMessage: text('action_needed_message'),
   createdAt: at('created_at'),
 }, (t) => ({
   // An amendment is a new version, never an edit. The old row keeps its
@@ -458,6 +461,21 @@ export const reports = telrad.table('reports', {
   // Structural, not advisory: one name cannot both sign and countersign.
   notSelfReview: check('reports_not_self_review', sql`${t.authorUserId} <> ${t.reviewerUserId}`),
   stateIdx: index('reports_state_idx').on(t.tenantId, t.state, t.createdAt),
+}));
+
+// A rating is the site's answer to "was this report useful". One row per delivered report,
+// so a radiologist's average is a real signal rather than a popularity contest. The desk
+// submits it; the reader never rates themselves.
+export const reportRatings = telrad.table('report_ratings', {
+  id: serialId('id'),
+  reportId: integer('report_id').notNull().references(() => reports.id),
+  tenantId: tenantId,
+  authorUserId: integer('author_user_id').notNull().references(() => users.id),
+  rating: smallint('rating').notNull(),
+  comment: text('comment'),
+  createdAt: at('created_at'),
+}, (t) => ({
+  reportUq: uniqueIndex('report_ratings_report_uq').on(t.reportId),
 }));
 
 // The closed loop: a critical finding is not a notification until a named

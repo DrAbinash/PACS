@@ -5,6 +5,7 @@ import { escalateOnce } from './escalate.js';
 import { notifyOnce } from './notify.js';
 import { pollOnce, recheckStalled } from './ingest.js';
 import { drainOnce } from './inbox.js';
+import { reviewSweepOnce } from './review.js';
 import { createOrthancReader, createOrthancWriter } from './orthanc.js';
 import { createSmtpTransport } from './smtp.js';
 import { createCriticalStore, createDispatchStore, createEscalationStore, createInboxStore, createNotifyStore, createStore } from './store.js';
@@ -83,6 +84,18 @@ async function settleCriticalLoops(): Promise<void> {
   }
 }
 
+// A signed report waiting for a second name is not a contract breach — the center was
+// answered on time — but a report that has sat unreviewed for two hours is an operational
+// gap the review queue does not surface to the operator. This sweep writes an audit row
+// so the late board shows it.
+async function settleReviewQueue(): Promise<void> {
+  const r = await reviewSweepOnce(handle.db);
+  if (r.alerted > 0) {
+    console.log(`review checked=${r.checked} alerted=${r.alerted} `
+      + '(signed reports waiting for a second name past the threshold)');
+  }
+}
+
 async function sweep(): Promise<void> {
   const d = await dispatchSweep(dispatch);
   if (d.widened > 0) console.log(`dispatch widened=${d.widened} (offers to at-capacity readers under a live widen_pool stage)`);
@@ -138,6 +151,12 @@ async function tick(): Promise<void> {
   }
 
   try {
+    await settleReviewQueue();
+  } catch (err) {
+    console.error('review sweep failed', err instanceof Error ? err.message : err);
+  }
+
+  try {
     // Its own label again: a clinic that was never told about a report is a different outage
     // from a case that was never routed, and the two queues do not share a failure mode.
     await notify();
@@ -181,6 +200,11 @@ if (process.argv[2] === 'dispatch-once') {
   // touching routing, because a sweep that also dispatches moves cases onto readers' desks
   // and the run then proves nothing about the loop it came to look at.
   await settleCriticalLoops();
+  await handle.close();
+} else if (process.argv[2] === 'review-once') {
+  // Only the review queue sweep. A verification run uses this to alert on reports waiting
+  // for a second name without touching routing or critical loops.
+  await settleReviewQueue();
   await handle.close();
 } else if (process.argv[2] === 'once') {
   await tick();

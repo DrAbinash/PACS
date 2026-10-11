@@ -660,6 +660,64 @@ export function billingRouter(db: Db): Router {
     res.json({ ok: true, tenantId, taxPct: pct });
   }));
 
+  // The prepaid balance is the center's running credit with the platform. A top-up is a
+  // payment received, not a service rendered, so it goes straight to the balance without
+  // passing through an invoice — the invoice is for the clinic's work, this is for the
+  // platform's keep-the-lights-on fund.
+  r.get('/billing/balance', ah(async (req: Ctx, res) => {
+    if (!requireRole(req.principal, OPERATOR, res)) return undefined;
+    const tenantId = Number(req.query.tenantId);
+    if (!Number.isInteger(tenantId)) return res.status(422).json({ ok: false, error: 'tenant_required' });
+    const [row] = await db.select({
+      balancePaise: tenants.prepaidBalancePaise,
+      code: tenants.code,
+      legalName: tenants.legalName,
+    }).from(tenants).where(eq(tenants.id, tenantId)).limit(1);
+    if (!row) return res.status(404).json({ ok: false, error: 'tenant_not_found' });
+    res.json({
+      ok: true,
+      tenantId,
+      tenantCode: row.code,
+      tenantName: row.legalName,
+      balancePaise: row.balancePaise,
+      balanceRupees: (row.balancePaise / 100).toFixed(2),
+    });
+  }));
+
+  r.post('/billing/topup', ah(async (req: Ctx, res) => {
+    if (!requireRole(req.principal, OPERATOR, res)) return undefined;
+    const tenantId = Number(req.body?.tenantId);
+    if (!Number.isInteger(tenantId)) return res.status(422).json({ ok: false, error: 'tenant_required' });
+    const amountPaise = paiseFromRupees(req.body?.amountRupees);
+    if (amountPaise === null || amountPaise <= 0) {
+      return res.status(422).json({ ok: false, error: 'amount_must_be_positive_rupees' });
+    }
+    const method = typeof req.body?.method === 'string' ? req.body.method.trim() : 'upi';
+    const reference = typeof req.body?.reference === 'string' ? req.body.reference.trim() : null;
+
+    const [updated] = await db.update(tenants)
+      .set({ prepaidBalancePaise: sql`${tenants.prepaidBalancePaise} + ${amountPaise}` })
+      .where(eq(tenants.id, tenantId))
+      .returning({ balancePaise: tenants.prepaidBalancePaise });
+    if (!updated) return res.status(404).json({ ok: false, error: 'tenant_not_found' });
+
+    await appendAudit(db, {
+      actorUserId: req.principal!.userId, actorKind: 'human', tenantId,
+      action: 'billing.topup', entity: 'tenants', entityId: String(tenantId),
+      detail: { amountPaise, method, reference, newBalancePaise: updated.balancePaise },
+    });
+    res.json({
+      ok: true,
+      tenantId,
+      amountPaise,
+      amountRupees: (amountPaise / 100).toFixed(2),
+      method,
+      reference,
+      newBalancePaise: updated.balancePaise,
+      newBalanceRupees: (updated.balancePaise / 100).toFixed(2),
+    });
+  }));
+
   r.use((_req, res) => res.status(404).json({ ok: false, error: 'not_found' }));
 
   return r;

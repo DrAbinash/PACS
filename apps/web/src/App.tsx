@@ -168,6 +168,14 @@ function Worklist({ onChanged, onOpen }: { onChanged: () => void; onOpen: (study
                 and an accept that had to be blind would be the one thing the padlock rule
                 is not supposed to allow. */}
             <button onClick={() => onOpen(c.studyId)}>Open</button>
+            <button
+              onClick={() => {
+                const url = `${window.location.origin}/study/${c.studyId}`;
+                const text = `Study ${c.accession ?? c.studyId} — ${c.modality ?? ''} ${c.patientName ?? ''}`;
+                window.open(`https://wa.me/?text=${encodeURIComponent(text + ' ' + url)}`, '_blank');
+              }}
+              title="Share on WhatsApp"
+            >Share</button>
             {declining === c.assignmentId && (
               <span className="acts">
                 <input placeholder="why (required)" value={reason}
@@ -247,6 +255,9 @@ function ReviewQueue({ show, onOpen }: { show: boolean; onOpen: (studyId: number
 // follow.
 function MyReports({ show, onOpen }: { show: boolean; onOpen: (studyId: number) => void }) {
   const [rows, setRows] = useState<MyReportItem[]>([]);
+  const [ratingFor, setRatingFor] = useState<number | null>(null);
+  const [ratingValue, setRatingValue] = useState(5);
+  const [ratingComment, setRatingComment] = useState('');
 
   const load = useCallback(async () => {
     try {
@@ -283,6 +294,32 @@ function MyReports({ show, onOpen }: { show: boolean; onOpen: (studyId: number) 
             {r.amendmentReason && <div className="sub">correction: {r.amendmentReason}</div>}
           </div>
           <button onClick={() => onOpen(r.studyId)}>Open</button>
+          <button
+            onClick={() => {
+              const url = `${window.location.origin}/study/${r.studyId}`;
+              const text = `Report ${r.accession ?? r.studyId} — ${r.modality ?? ''} ${r.patientName ?? ''}`;
+              window.open(`https://wa.me/?text=${encodeURIComponent(text + ' ' + url)}`, '_blank');
+            }}
+            title="Share on WhatsApp"
+          >Share</button>
+          {ratingFor === r.reportId ? (
+            <span className="acts">
+              {[1, 2, 3, 4, 5].map((n) => (
+                <button key={n} onClick={() => setRatingValue(n)}
+                  style={{ fontWeight: n === ratingValue ? 'bold' : undefined }}>{n}</button>
+              ))}
+              <input placeholder="comment (optional)" value={ratingComment}
+                onChange={(e) => setRatingComment(e.target.value)} style={{ width: 120 }} />
+              <button className="primary" onClick={async () => {
+                await api.rateReport(r.reportId, ratingValue, ratingComment.trim() || undefined);
+                setRatingFor(null);
+                setRatingComment('');
+              }}>Save</button>
+              <button onClick={() => setRatingFor(null)}>Cancel</button>
+            </span>
+          ) : (
+            <button onClick={() => { setRatingFor(r.reportId); setRatingValue(5); }}>Rate</button>
+          )}
         </div>
       ))}
     </div>
@@ -306,6 +343,8 @@ function AwaitingDelivery({ show, canOpen, onOpen }: {
   const [rows, setRows] = useState<DeliveryItem[]>([]);
   const [busy, setBusy] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [actionMsgFor, setActionMsgFor] = useState<number | null>(null);
+  const [actionMsg, setActionMsg] = useState('');
 
   const load = useCallback(async () => {
     try {
@@ -374,6 +413,29 @@ function AwaitingDelivery({ show, canOpen, onOpen }: {
           )}
           {canOpen && <button onClick={() => onOpen(r.studyId)}>Open</button>}
           <a className="link" href={api.pdfHref(r.reportId)}>PDF</a>
+          {actionMsgFor === r.reportId ? (
+            <span className="acts">
+              <input placeholder="what needs attention" value={actionMsg}
+                onChange={(e) => setActionMsg(e.target.value)} style={{ width: 160 }} />
+              <button className="primary" onClick={async () => {
+                await api.setActionNeeded(r.reportId, actionMsg.trim() || undefined);
+                setActionMsgFor(null);
+                setActionMsg('');
+                await load();
+              }}>Flag</button>
+              <button onClick={() => { setActionMsgFor(null); setActionMsg(''); }}>Cancel</button>
+            </span>
+          ) : (
+            <button onClick={() => { setActionMsgFor(r.reportId); setActionMsg(''); }}>Action needed</button>
+          )}
+          <button
+            onClick={() => {
+              const url = `${window.location.origin}/study/${r.studyId}`;
+              const text = `Report ${r.accession ?? r.studyId} — ${r.modality ?? ''} ${r.patientName ?? ''}`;
+              window.open(`https://wa.me/?text=${encodeURIComponent(text + ' ' + url)}`, '_blank');
+            }}
+            title="Share on WhatsApp"
+          >Share</button>
         </div>
       ))}
     </div>
@@ -449,6 +511,11 @@ function Waiting({ show, onOpen }: { show: boolean; onOpen: (studyId: number) =>
   const [late, setLate] = useState<LateCase[]>([]);
   const [blocked, setBlocked] = useState<BlockedCase[]>([]);
   const [unheld, setUnheld] = useState(0);
+  const [reviewWaiting, setReviewWaiting] = useState<{
+    reportId: number; studyId: number; tenant: string | null; accession: string | null;
+    modality: string | null; subSpecialty: string | null; signedAt: string | null;
+    authorName: string; waitingMinutes: number | null;
+  }[]>([]);
 
   useEffect(() => {
     if (!show) return;
@@ -459,6 +526,7 @@ function Waiting({ show, onOpen }: { show: boolean; onOpen: (studyId: number) =>
         if (!live) return;
         setLate(e.late);
         setUnheld(e.counts.unheld);
+        setReviewWaiting(e.reviewWaiting ?? []);
         setBlocked(b.unassigned.filter((u) => u.status === 'blocked'));
       } catch {
         // The panel already carries the "feed lost" banner; a stale waiting list should
@@ -470,11 +538,18 @@ function Waiting({ show, onOpen }: { show: boolean; onOpen: (studyId: number) =>
     return () => { live = false; clearInterval(timer); };
   }, [show]);
 
-  if (!show || (late.length === 0 && blocked.length === 0)) return null;
+  if (!show || (late.length === 0 && blocked.length === 0 && reviewWaiting.length === 0)) return null;
 
   return (
     <div className="card">
-      <h2>Waiting</h2>
+      <h2>
+        Waiting
+        <span className="sub">
+          {late.length > 0 && ` · ${late.length} late`}
+          {reviewWaiting.length > 0 && ` · ${reviewWaiting.length} awaiting second name`}
+          {blocked.length > 0 && ` · ${blocked.length} cannot route`}
+        </span>
+      </h2>
       {late.length > 0 && (
         <table>
           <thead>
@@ -503,6 +578,29 @@ function Waiting({ show, onOpen }: { show: boolean; onOpen: (studyId: number) =>
             ))}
           </tbody>
         </table>
+      )}
+      {reviewWaiting.length > 0 && (
+        <>
+          <h3 className="sub">Awaiting second name</h3>
+          <table>
+            <thead>
+              <tr><th>Report</th><th>Author</th><th>Waiting</th><th /></tr>
+            </thead>
+            <tbody>
+              {reviewWaiting.map((r) => (
+                <tr key={r.reportId}>
+                  <td>
+                    <strong>{r.accession ?? `study ${r.studyId}`}</strong>
+                    <div className="sub">{r.tenant} · {r.modality} {r.subSpecialty}</div>
+                  </td>
+                  <td>{r.authorName}</td>
+                  <td>{r.waitingMinutes !== null ? `${r.waitingMinutes} min` : '—'}</td>
+                  <td><button onClick={() => onOpen(r.studyId)}>Open</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
       )}
       {blocked.length > 0 && (
         <>

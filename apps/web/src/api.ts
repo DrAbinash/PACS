@@ -189,6 +189,8 @@ export type ReportView = {
   supersededByVersion: number | null;
   amendmentReason: string | null;
   createdAt: string;
+  actionNeeded: boolean;
+  actionNeededMessage: string | null;
   gaps: ReportSection[];
   // The server's own answer about what this reader may do to this document, so the panel
   // cannot offer a button the route is going to refuse. `deliver` is role-gated: releasing
@@ -414,8 +416,15 @@ export const api = {
       method: 'POST', body: JSON.stringify({ reason }),
     }),
   escalations: () =>
-    call<{ late: LateCase[]; counts: { open: number; late: number; breached: number; unheld: number } }>(
-      '/v1/escalations'),
+    call<{
+      late: LateCase[];
+      counts: { open: number; late: number; breached: number; unheld: number; reviewWaiting: number };
+      reviewWaiting: {
+        reportId: number; studyId: number; tenant: string | null; accession: string | null;
+        modality: string | null; subSpecialty: string | null; signedAt: string | null;
+        authorName: string; waitingMinutes: number | null;
+      }[];
+    }>('/v1/escalations'),
   blocked: () =>
     call<{ unassigned: BlockedCase[]; counts: { unassigned: number; blocked: number } }>('/v1/dispatch/unassigned'),
   view: (studyId: number) => call<ViewDescriptor>(`/v1/view/${studyId}`),
@@ -509,6 +518,40 @@ export const api = {
   deleteInvoice: (id: number) =>
     call<{ ok: boolean; dropped: boolean }>(`/v1/billing/invoices/${id}`, { method: 'DELETE' }),
   invoiceCsvHref: (id: number) => `/v1/billing/invoices/${id}/export.csv`,
+
+  // Action-needed flag: the desk marking a report as needing clinic attention before release.
+  setActionNeeded: (id: number, message?: string) =>
+    call<{ report: ReportView }>(`/v1/reports/${id}/action-needed`, {
+      method: 'POST', body: JSON.stringify({ set: true, message: message ?? null }),
+    }),
+  clearActionNeeded: (id: number) =>
+    call<{ report: ReportView }>(`/v1/reports/${id}/action-needed`, {
+      method: 'POST', body: JSON.stringify({ set: false }),
+    }),
+
+  // A rating the desk leaves on a delivered report. One per report, updatable.
+  rateReport: (id: number, rating: number, comment?: string) =>
+    call<{ ok: boolean; reportId: number; rating: number; comment: string | null }>(
+      `/v1/reports/${id}/rate`, {
+        method: 'POST',
+        body: JSON.stringify({ rating, comment: comment ?? null }),
+      }),
+
+  // Prepaid balance: what the center has credit for, and adding to it.
+  billingBalance: (tenantId: number) =>
+    call<{
+      ok: boolean; tenantId: number; tenantCode: string; tenantName: string;
+      balancePaise: number; balanceRupees: string;
+    }>(`/v1/billing/balance?tenantId=${tenantId}`),
+  billingTopup: (tenantId: number, amountRupees: number, method?: string, reference?: string) =>
+    call<{
+      ok: boolean; tenantId: number; amountPaise: number; amountRupees: string;
+      method: string; reference: string | null;
+      newBalancePaise: number; newBalanceRupees: string;
+    }>('/v1/billing/topup', {
+      method: 'POST',
+      body: JSON.stringify({ tenantId, amountRupees, method: method ?? 'upi', reference: reference ?? null }),
+    }),
 };
 
 async function frame(studyId: number, pk: string, index: number): Promise<ArrayBuffer> {

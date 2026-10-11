@@ -435,6 +435,31 @@ export function worklistRouter(db: Db): Router {
     }).from(escalationRules).where(eq(escalationRules.enabled, true)))
       .map((row) => ({ ...row, action: row.action as EscalationRule['action'] }));
 
+    // Signed reports waiting for a second name. These are not on the SLA clock — the
+    // contract was answered at signature — but a report that has sat unreviewed for hours
+    // is an operational gap the reviewer queue does not surface to the operator. The sweep
+    // writes audit rows; this query shows the live state so the board can name them.
+    const reviewWaiting = await db.select({
+      reportId: reports.id,
+      studyId: reports.studyId,
+      tenantId: reports.tenantId,
+      tenantCode: tenants.code,
+      accession: studies.accessionNumber,
+      modality: studies.modalityCode,
+      subSpecialty: studies.subSpecialtyCode,
+      signedAt: reports.signedAt,
+      authorName: reports.authorName,
+    }).from(reports)
+      .innerJoin(studies, eq(studies.id, reports.studyId))
+      .leftJoin(tenants, eq(tenants.id, reports.tenantId))
+      .where(and(
+        eq(reports.state, 'signed'),
+        isNull(reports.reviewerUserId),
+        tenantId === null ? undefined : eq(reports.tenantId, tenantId),
+      ))
+      .orderBy(reports.signedAt)
+      .limit(50);
+
     // "Late" means the sweep would say something about it: a stage already fired, a
     // deadline passed, or a stage due on the next pass. A calm clock is not on this board.
     // ClockLike is the shape the shared rule measures; the board's rows carry a few more
@@ -457,6 +482,7 @@ export function worklistRouter(db: Db): Router {
         late: late.length,
         breached: late.filter((c) => c.breached || isBreached(asClock(c), now)).length,
         unheld: late.filter((c) => !holderOf.has(c.studyId)).length,
+        reviewWaiting: reviewWaiting.length,
       },
       late: late.map((c) => ({
         clockId: c.clockId,
@@ -473,6 +499,17 @@ export function worklistRouter(db: Db): Router {
         lastEscalatedAt: c.lastEscalatedAt,
         breached: c.breached || isBreached(asClock(c), now),
         holder: holderOf.get(c.studyId) ?? null,
+      })),
+      reviewWaiting: reviewWaiting.map((r) => ({
+        reportId: r.reportId,
+        studyId: r.studyId,
+        tenant: r.tenantCode,
+        accession: r.accession,
+        modality: r.modality,
+        subSpecialty: r.subSpecialty,
+        signedAt: r.signedAt,
+        authorName: r.authorName,
+        waitingMinutes: r.signedAt ? Math.round((now.getTime() - r.signedAt.getTime()) / 60_000) : null,
       })),
     });
   }));

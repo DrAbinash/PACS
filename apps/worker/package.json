@@ -9,6 +9,7 @@
     "once": "tsx src/main.ts once",
     "dispatch-once": "tsx src/main.ts dispatch-once",
     "criticals-once": "tsx src/main.ts criticals-once",
+    "review-once": "tsx src/main.ts review-once",
     "notify-once": "tsx src/main.ts notify-once",
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",

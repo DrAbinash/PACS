@@ -1,7 +1,7 @@
 import { and, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import {
   type Db, appendAudit, assignments, clinicianProfiles, orders, patients, reports,
-  reportDeliveries, slaClocks, studies, subSpecialties, tenants, users, type Report,
+  reportDeliveries, reportRatings, slaClocks, studies, subSpecialties, tenants, users, type Report,
 } from '@telrad/db';
 import {
   REPORT_SECTIONS, type Grade, amendDecision, countersignDecision, currentVersion,
@@ -241,6 +241,8 @@ export function reportsRouter(db: Db): Router {
       supersededByVersion: supersededByOf(history, row.id),
       amendmentReason: row.amendmentReason,
       createdAt: row.createdAt,
+      actionNeeded: row.actionNeeded,
+      actionNeededMessage: row.actionNeededMessage,
       // An amendment's turnaround is the time from when v(n+1) was created to when it was
       // signed. The data is already on the row (signedAt - createdAt for rows where
       // supersedesReportId is not null), but surfacing it here means a contract that prices
@@ -1198,6 +1200,73 @@ export function reportsRouter(db: Db): Router {
       detail: { studyId: row.studyId, version: row.version, reason: req.body?.reason ?? null },
     });
     return respond(res, p, id);
+  }));
+
+  // A desk flagging a report as needing action is a different act from amending it: the words
+  // on the document are not in question, but the clinic needs to know something before the
+  // paper leaves. The flag travels with the report until someone clears it.
+  r.post('/reports/:id/action-needed', ah(async (req: Ctx, res) => {
+    if (!requireRole(req.principal, DESK_ROLES, res)) return undefined;
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ ok: false, error: 'bad_id' });
+    const p = req.principal!;
+    const row = await loadReport(id);
+    if (!row) return res.status(404).json({ ok: false, error: 'not_found' });
+    const scope = scopeTenant(p);
+    if (scope !== null && row.tenantId !== scope) return await denied(res, p, String(id), true);
+
+    const message = typeof req.body?.message === 'string' ? req.body.message.trim() : null;
+    const set = req.body?.set !== false;
+    await db.update(reports).set({
+      actionNeeded: set,
+      actionNeededMessage: set ? message : null,
+    }).where(eq(reports.id, id));
+
+    await appendAudit(db, {
+      actorUserId: p.userId, actorKind: 'human', tenantId: row.tenantId,
+      action: set ? 'report.action_needed_set' : 'report.action_needed_cleared',
+      entity: 'reports', entityId: String(id),
+      detail: { studyId: row.studyId, message: set ? message : null },
+    });
+    return respond(res, p, id);
+  }));
+
+  // A rating is the clinic's judgement of the report they received, not the reader's own
+  // assessment. One rating per report: a second opinion about quality is an amendment, not a
+  // second star.
+  r.post('/reports/:id/rate', ah(async (req: Ctx, res) => {
+    if (!requireRole(req.principal, DESK_ROLES, res)) return undefined;
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ ok: false, error: 'bad_id' });
+    const p = req.principal!;
+    const row = await loadReport(id);
+    if (!row) return res.status(404).json({ ok: false, error: 'not_found' });
+    const scope = scopeTenant(p);
+    if (scope !== null && row.tenantId !== scope) return await denied(res, p, String(id), true);
+
+    const rating = Number(req.body?.rating);
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+      return res.status(422).json({ ok: false, error: 'rating_must_be_1_to_5' });
+    }
+    const comment = typeof req.body?.comment === 'string' ? req.body.comment.trim() : null;
+
+    await db.insert(reportRatings).values({
+      reportId: id,
+      tenantId: row.tenantId,
+      authorUserId: p.userId,
+      rating,
+      comment,
+    }).onConflictDoUpdate({
+      target: reportRatings.reportId,
+      set: { rating, comment },
+    });
+
+    await appendAudit(db, {
+      actorUserId: p.userId, actorKind: 'human', tenantId: row.tenantId,
+      action: 'report.rated', entity: 'reports', entityId: String(id),
+      detail: { studyId: row.studyId, rating, comment },
+    });
+    return res.json({ ok: true, reportId: id, rating, comment });
   }));
 
   return r;

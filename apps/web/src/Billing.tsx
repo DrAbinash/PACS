@@ -20,6 +20,9 @@ export function Billing({ tenantId }: { tenantId: number }) {
   const [periodEnd, setPeriodEnd] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<number | null>(null);
+  const [balance, setBalance] = useState<{ balancePaise: number; balanceRupees: string } | null>(null);
+  const [topupAmount, setTopupAmount] = useState('');
+  const [topupRef, setTopupRef] = useState('');
 
   const load = useCallback(async () => {
     try {
@@ -32,9 +35,19 @@ export function Billing({ tenantId }: { tenantId: number }) {
     }
   }, [tenantId]);
 
+  const loadBalance = useCallback(async () => {
+    try {
+      const res = await api.billingBalance(tenantId);
+      setBalance({ balancePaise: res.balancePaise, balanceRupees: res.balanceRupees });
+    } catch {
+      // The invoice list already reports server failure; a missing balance is not a second banner.
+    }
+  }, [tenantId]);
+
   useEffect(() => {
     void load();
-  }, [load]);
+    void loadBalance();
+  }, [load, loadBalance]);
 
   async function viewInvoice(id: number) {
     try {
@@ -109,6 +122,32 @@ export function Billing({ tenantId }: { tenantId: number }) {
     <div className="card">
       <h2>Billing</h2>
       {error && <div className="error">{error}</div>}
+
+      {balance && (
+        <div className="billing-preview" style={{ marginBottom: 12 }}>
+          <h3 className="sub">Prepaid balance</h3>
+          <div style={{ fontSize: '1.2em', fontWeight: 'bold' }}>
+            {formatRupees(balance.balancePaise)}
+          </div>
+          <div className="billing-period" style={{ marginTop: 8 }}>
+            <input type="number" min="1" step="1" placeholder="amount in ₹"
+              value={topupAmount} onChange={(e) => setTopupAmount(e.target.value)} style={{ width: 100 }} />
+            <input placeholder="UPI ref (optional)" value={topupRef}
+              onChange={(e) => setTopupRef(e.target.value)} style={{ width: 140 }} />
+            <button className="primary" disabled={!topupAmount || Number(topupAmount) <= 0}
+              onClick={async () => {
+                try {
+                  await api.billingTopup(tenantId, Number(topupAmount), 'upi', topupRef.trim() || undefined);
+                  await loadBalance();
+                  setTopupAmount('');
+                  setTopupRef('');
+                } catch (err) {
+                  setError(err instanceof ApiError ? err.message : 'top-up failed');
+                }
+              }}>Top up</button>
+          </div>
+        </div>
+      )}
 
       <div className="billing-preview">
         <h3 className="sub">Preview a period</h3>
