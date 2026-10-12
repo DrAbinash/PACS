@@ -514,5 +514,125 @@ export function worklistRouter(db: Db): Router {
     });
   }));
 
+  // Bulk operations: a desk operator who has ten studies queued for the same reader can
+  // accept or assign them in one click rather than ten. Each operation is audited
+  // individually so a bulk action that partially fails leaves a trace of which ones
+  // succeeded and which did not.
+  r.post('/assignments/bulk-accept', ah(async (req: Ctx, res) => {
+    if (!requireRole(req.principal, READER_ROLES, res)) return undefined;
+    const principal = req.principal!;
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(Number) : [];
+
+    if (ids.length === 0 || ids.length > 50) {
+      return res.status(400).json({ ok: false, error: 'ids must be an array of 1 to 50 assignment ids' });
+    }
+    if (!ids.every(Number.isInteger)) {
+      return res.status(400).json({ ok: false, error: 'ids must all be integers' });
+    }
+
+    const now = new Date();
+    const results: { id: number; ok: boolean; error?: string }[] = [];
+
+    for (const id of ids) {
+      const [row] = await db.update(assignments)
+        .set({ state: 'accepted', acceptedAt: now, lockToken: newToken(24) })
+        .where(and(
+          eq(assignments.id, id),
+          eq(assignments.clinicianUserId, principal.userId),
+          eq(assignments.state, 'offered'),
+        ))
+        .returning({ id: assignments.id, studyId: assignments.studyId });
+
+      if (row) {
+        await appendAudit(db, {
+          actorUserId: principal.userId, actorKind: 'human', tenantId: principal.tenantId,
+          action: 'assignment.accepted', entity: 'assignments', entityId: String(row.id),
+          detail: { studyId: row.studyId, bulk: true },
+        });
+        results.push({ id, ok: true });
+      } else {
+        results.push({ id, ok: false, error: 'not_found_or_not_offered' });
+      }
+    }
+
+    res.json({
+      ok: true,
+      accepted: results.filter((r) => r.ok).length,
+      failed: results.filter((r) => !r.ok).length,
+      results,
+    });
+  }));
+
+  r.post('/assignments/bulk-assign', ah(async (req: Ctx, res) => {
+    if (!requireRole(req.principal, ['owner', 'console'], res)) return undefined;
+    const principal = req.principal!;
+    const studyIds = Array.isArray(req.body?.studyIds) ? req.body.studyIds.map(Number) : [];
+    const clinicianUserId = Number(req.body?.clinicianUserId);
+
+    if (studyIds.length === 0 || studyIds.length > 50) {
+      return res.status(400).json({ ok: false, error: 'studyIds must be an array of 1 to 50 study ids' });
+    }
+    if (!Number.isInteger(clinicianUserId)) {
+      return res.status(400).json({ ok: false, error: 'clinicianUserId required' });
+    }
+
+    const now = new Date();
+    const results: { studyId: number; ok: boolean; error?: string; assignmentId?: number }[] = [];
+
+    for (const studyId of studyIds) {
+      // Check if the study exists and is in the operator's tenant.
+      const [study] = await db.select({ id: studies.id, tenantId: studies.tenantId })
+        .from(studies).where(eq(studies.id, studyId)).limit(1);
+
+      if (!study || (principal.role !== 'owner' && study.tenantId !== principal.tenantId)) {
+        results.push({ studyId, ok: false, error: 'not_found' });
+        continue;
+      }
+
+      // Check if there's already an active assignment.
+      const [existing] = await db.select({ id: assignments.id, state: assignments.state })
+        .from(assignments)
+        .where(and(
+          eq(assignments.studyId, studyId),
+          inArray(assignments.state, ['offered', 'accepted', 'reading']),
+        ))
+        .limit(1);
+
+      if (existing) {
+        results.push({ studyId, ok: false, error: 'already_assigned' });
+        continue;
+      }
+
+      // Create the assignment.
+      const inserted = (await db.insert(assignments).values({
+        studyId,
+        tenantId: study.tenantId as number,
+        clinicianUserId,
+        state: 'offered',
+        offeredAt: now,
+        attemptNo: 1,
+      }).returning({ id: assignments.id }))[0];
+      if (!inserted) {
+        results.push({ studyId, ok: false, error: 'insert_failed' });
+        continue;
+      }
+
+      await appendAudit(db, {
+        actorUserId: principal.userId, actorKind: 'human', tenantId: study.tenantId as number,
+        action: 'assignment.created', entity: 'assignments', entityId: String(inserted.id),
+        detail: { studyId, clinicianUserId, bulk: true },
+      });
+
+      results.push({ studyId, ok: true, assignmentId: inserted.id });
+    }
+
+    res.json({
+      ok: true,
+      assigned: results.filter((r) => r.ok).length,
+      failed: results.filter((r) => !r.ok).length,
+      results,
+    });
+  }));
+
   return r;
 }

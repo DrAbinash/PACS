@@ -1,4 +1,5 @@
 import { openDb } from '@telrad/db';
+import { autoEscalateOnce } from './auto-escalate.js';
 import { criticalSweepOnce } from './criticals.js';
 import { dispatchSweep } from './dispatch.js';
 import { escalateOnce } from './escalate.js';
@@ -171,6 +172,12 @@ async function tick(): Promise<void> {
   }
 
   try {
+    await autoEscalateOnce({ db: handle.db, nodeId });
+  } catch (err) {
+    console.error('auto-escalate failed', err instanceof Error ? err.message : err);
+  }
+
+  try {
     await releaseStale();
   } catch (err) {
     console.error('release sweep failed', err instanceof Error ? err.message : err);
@@ -230,6 +237,11 @@ if (process.argv[2] === 'dispatch-once') {
   // Only the release sweep. A verification run uses this to prove that a reader who went
   // offline has their cases returned without touching routing or dispatch.
   await releaseStale();
+  await handle.close();
+} else if (process.argv[2] === 'auto-escalate-once') {
+  // Only the auto-escalation sweep. A verification run uses this to bump priorities
+  // without touching routing or dispatch.
+  await autoEscalateOnce({ db: handle.db, nodeId });
   await handle.close();
 } else if (process.argv[2] === 'once') {
   await tick();

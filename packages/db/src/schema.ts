@@ -177,6 +177,27 @@ export const subSpecialties = telrad.table('sub_specialties', {
   requiresReviewer: boolean('requires_reviewer').notNull().default(true),
 });
 
+// Per-tenant SLA targets: a center can override the sub-specialty default for specific
+// modality/priority combinations. A neuro center that wants all MRIs read within 4 hours
+// regardless of priority sets a row here; the dispatch logic reads this table first, then
+// falls back to the sub-specialty default if no override exists.
+export const slaTargets = telrad.table('sla_targets', {
+  id: serialId('id'),
+  tenantId: tenantId,
+  modalityCode: text('modality_code').notNull(),
+  priority: text('priority', { enum: ['stat', 'urgent', 'routine'] }).notNull(),
+  slaMinutes: integer('sla_minutes').notNull(),
+  effectiveFrom: timestamp('effective_from', { withTimezone: true, mode: 'date' }).notNull(),
+  effectiveTo: timestamp('effective_to', { withTimezone: true, mode: 'date' }),
+}, (t) => ({
+  // One active target per tenant/modality/priority at a time. Overlapping periods are
+  // refused: a center that has two rows for the same combination has a configuration
+  // error, not a clever scheduling trick.
+  targetUq: uniqueIndex('sla_targets_tenant_modality_priority_uq')
+    .on(t.tenantId, t.modalityCode, t.priority)
+    .where(sql`${t.effectiveTo} IS NULL`),
+}));
+
 export const modalities = telrad.table('modalities', {
   code: text('code').primaryKey(),
   name: text('name').notNull(),

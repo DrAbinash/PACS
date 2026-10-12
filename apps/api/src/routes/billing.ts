@@ -1,7 +1,7 @@
-import { and, asc, desc, eq, gte, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, isNull, lt, or, sql } from 'drizzle-orm';
 import type { Db } from '@telrad/db';
 import {
-  appendAudit, invoiceLines, invoices, modalities, subSpecialties, tariffs, tenants,
+  appendAudit, filmExports, invoiceLines, invoices, modalities, subSpecialties, tariffs, tenants,
 } from '@telrad/db';
 import {
   cleanText,
@@ -421,21 +421,37 @@ export function billingRouter(db: Db): Router {
         invoiceNumber: clash.number, status: clash.status });
     }
 
-    const [billable, rows, pct] = await Promise.all([
+    const [billable, rows, pct, unbilledFilms] = await Promise.all([
       billableIn(db, tenantId, bounds.from, bounds.to),
       tariffRows(db, tenantId),
       taxPct(db, tenantId),
+      db.select({
+        id: filmExports.id, studyId: filmExports.studyId, medium: filmExports.medium,
+        quantity: filmExports.quantity, unitPaise: filmExports.unitPaise,
+        totalPaise: filmExports.totalPaise, patientName: filmExports.patientName,
+      }).from(filmExports).where(and(
+        eq(filmExports.tenantId, tenantId),
+        isNull(filmExports.invoiceLineId),
+        gte(filmExports.exportedAt, bounds.from),
+        lt(filmExports.exportedAt, bounds.to),
+      )),
     ]);
     const drafted = draftLines(billable, rows, tzOffsetMinutes(tenant.timezone, new Date()));
-    if (drafted.lines.length === 0) {
+    if (drafted.lines.length === 0 && unbilledFilms.length === 0) {
       return res.status(422).json({ ok: false, error: 'nothing_billable_in_period',
         unpriced: drafted.unpriced, deliveredStudies: billable.length });
     }
-    const sum = totals(drafted.lines, pct);
+    const filmPaise = unbilledFilms.reduce((s, f) => s + f.totalPaise, 0);
+    const filmGross = filmPaise;
+    const filmTax = Math.round(filmGross * pct / 100);
+    const studySum = totals(drafted.lines, pct);
+    const sum = {
+      grossPaise: studySum.grossPaise + filmGross,
+      taxPaise: studySum.taxPaise + filmTax,
+      totalPaise: studySum.totalPaise + filmGross + filmTax,
+    };
 
     const [invoice] = await db.insert(invoices).values({
-      // A draft has no number: minting one at draft time is how a deleted draft leaves a hole in
-      // a GST sequence, and a gap is a question that has to be answered in writing.
       number: `draft-${tenant.code}-${Date.now().toString(36)}`,
       tenantId, periodStart: bounds.from, periodEnd: bounds.to, currency: 'INR',
       grossPaise: sum.grossPaise, taxPaise: sum.taxPaise, status: 'draft',
@@ -448,14 +464,26 @@ export function billingRouter(db: Db): Router {
       });
     }
 
+    for (const f of unbilledFilms) {
+      const [line] = await db.insert(invoiceLines).values({
+        invoiceId: invoice!.id, studyId: f.studyId,
+        description: `Film export: ${f.medium} x${f.quantity} (${f.patientName})`,
+        amountPaise: f.totalPaise, taxable: true,
+      }).returning();
+      if (line) {
+        await db.update(filmExports).set({ invoiceLineId: line.id }).where(eq(filmExports.id, f.id));
+      }
+    }
+
     await appendAudit(db, {
       actorUserId: req.principal!.userId, actorKind: 'human', tenantId,
       action: 'billing.invoice_drafted', entity: 'invoices', entityId: String(invoice!.id),
-      detail: { period: bounds, lines: drafted.lines.length, grossPaise: sum.grossPaise,
-        taxPaise: sum.taxPaise, taxPct: pct, unpriced: drafted.unpriced.length },
+      detail: { period: bounds, lines: drafted.lines.length, filmLines: unbilledFilms.length,
+        grossPaise: sum.grossPaise, taxPaise: sum.taxPaise, taxPct: pct,
+        unpriced: drafted.unpriced.length },
     });
     res.status(201).json({ ok: true, id: invoice!.id, lines: drafted.lines.length,
-      unpriced: drafted.unpriced, totals: sum });
+      filmLines: unbilledFilms.length, unpriced: drafted.unpriced, totals: sum });
   }));
 
   r.get('/billing/invoices', ah(async (req: Ctx, res) => {

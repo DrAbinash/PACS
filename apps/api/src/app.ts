@@ -1,4 +1,4 @@
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, lte, sql } from 'drizzle-orm';
 import type { Db } from '@telrad/db';
 import {
   appendAudit,
@@ -18,10 +18,12 @@ import { clinicalRouter } from './routes/clinical.js';
 import { criticalsRouter } from './routes/criticals.js';
 import { filmRouter } from './routes/film.js';
 import { orphansRouter } from './routes/orphans.js';
+import { performanceRouter } from './routes/performance.js';
 import { presenceRouter } from './routes/presence.js';
 import { qcRouter } from './routes/qc.js';
 import { reportsRouter } from './routes/reports.js';
 import { sitesRouter } from './routes/sites.js';
+import { slaRouter } from './routes/sla.js';
 import { uploadsRouter } from './routes/uploads.js';
 import { viewRouter } from './routes/view.js';
 import { worklistRouter } from './routes/worklist.js';
@@ -230,6 +232,73 @@ export function createApp(deps: AppDeps): Express {
     res.json({ ok: true, entries: rows });
   }));
 
+  // Audit export: a regulator or a center's compliance officer asks for "everything that
+  // happened in October". The answer is a CSV or JSON file, not a screenshot of the
+  // console. The export is tenant-scoped: a console operator sees their own center's
+  // chain, and an owner sees all of them.
+  router.get('/audit/export', requireAuth(db), ah(async (req: Ctx, res) => {
+    const p = req.principal!;
+    if (p.role !== 'owner' && p.role !== 'console') {
+      return res.status(403).json({ ok: false, error: 'forbidden' });
+    }
+
+    const from = req.query.from ? new Date(String(req.query.from)) : new Date(Date.now() - 30 * 86400_000);
+    const to = req.query.to ? new Date(String(req.query.to)) : new Date();
+    const format = String(req.query.format ?? 'json').toLowerCase();
+    const tenantId = p.role === 'owner' ? null : p.tenantId;
+
+    const rows = await db.select({
+      id: auditLog.id,
+      action: auditLog.action,
+      entity: auditLog.entity,
+      entityId: auditLog.entityId,
+      actorUserId: auditLog.actorUserId,
+      actorKind: auditLog.actorKind,
+      tenantId: auditLog.tenantId,
+      occurredAt: auditLog.occurredAt,
+      rowHash: auditLog.rowHash,
+      prevHash: auditLog.prevHash,
+      detail: auditLog.detail,
+    }).from(auditLog)
+      .where(and(
+        gte(auditLog.occurredAt, from),
+        lte(auditLog.occurredAt, to),
+        tenantId === null ? sql`true` : eq(auditLog.tenantId, tenantId),
+      ))
+      .orderBy(desc(auditLog.id))
+      .limit(10000);
+
+    if (format === 'csv') {
+      const header = 'id,action,entity,entity_id,actor_user_id,actor_kind,tenant_id,occurred_at,row_hash,prev_hash,detail\n';
+      const csvRows = rows.map((r) => [
+        r.id,
+        `"${r.action}"`,
+        `"${r.entity}"`,
+        `"${r.entityId}"`,
+        r.actorUserId ?? '',
+        `"${r.actorKind}"`,
+        r.tenantId ?? '',
+        `"${r.occurredAt.toISOString()}"`,
+        `"${r.rowHash}"`,
+        `"${r.prevHash ?? ''}"`,
+        `"${JSON.stringify(r.detail ?? {}).replace(/"/g, '""')}"`,
+      ].join(','));
+      const csv = header + csvRows.join('\n');
+
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename="audit-${from.toISOString().slice(0, 10)}-to-${to.toISOString().slice(0, 10)}.csv"`);
+      res.send(csv);
+    } else {
+      res.json({
+        ok: true,
+        from,
+        to,
+        count: rows.length,
+        entries: rows,
+      });
+    }
+  }));
+
   // Mounted first, and deliberately so. The session-scoped routers below guard
   // themselves with `r.use(requireAuth)`, and a router mounted at '/v1' runs that
   // guard for every '/v1/...' request — including '/v1/uploads/...'. A site agent has
@@ -250,6 +319,8 @@ export function createApp(deps: AppDeps): Express {
   app.use('/v1', billingRouter(db));
   app.use('/v1', qcRouter(db));
   app.use('/v1', filmRouter(db));
+  app.use('/v1', performanceRouter(db));
+  app.use('/v1', slaRouter(db));
 
   // An unknown `/v1/...` path answers with JSON, not Express's HTML 404. Every other
   // failure mode in this API speaks JSON, and a client should not have to special-case one.
