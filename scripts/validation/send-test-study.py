@@ -72,6 +72,15 @@ def rest(path):
         return json.loads(res.read().decode())
 
 
+def rest_post(path, body):
+    token = base64.b64encode(Creds.encode()).decode()
+    req = urllib.request.Request(
+        REST_URL + path, data=json.dumps(body).encode(),
+        headers={"Authorization": "Basic " + token, "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=15) as res:
+        return json.loads(res.read().decode())
+
+
 def main():
     ds, meta = build_instance()
     ae = AE(ae_title="TELRAD_TEST")
@@ -96,10 +105,16 @@ def main():
         return 1
 
     # Address the instance by its SOP UID: a shared Orthanc accumulates NewInstance
-    # entries from every send, and the last one in /changes is not necessarily ours.
-    # Orthanc resolves a resource id given its DICOM UID.
-    inst = rest(f"/instances/{ds.SOPInstanceUID}")
-    instance_id = inst["ID"]
+    # entries, so the last one in /changes is not necessarily ours. /instances/<uid>
+    # answers 404 on the pinned image, so look the id up with /tools/find.
+    found = rest_post("/tools/find", {"Level": "Instance",
+                                      "Query": {"SOPInstanceUID": ds.SOPInstanceUID}})
+    if len(found) != 1:
+        print(f"FAIL /tools/find for the sent SOP UID answered {len(found)} instances",
+              file=sys.stderr)
+        return 1
+    instance_id = found[0]
+    inst = rest(f"/instances/{instance_id}")
     # /metadata answers the list of metadata keys; /tags?short answers the hex-keyed
     # plain-value dict the checks below read.
     meta_back = rest(f"/instances/{instance_id}/tags?short")
