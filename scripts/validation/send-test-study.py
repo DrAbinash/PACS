@@ -24,7 +24,6 @@ ORTHANC_HOST = os.environ.get("TEST_ORTHANC_HOST", "tr-orth")
 ORTHANC_PORT = int(os.environ.get("TEST_ORTHANC_PORT", "4242"))
 REST_URL = os.environ.get("TEST_ORTHANC_REST", "http://tr-orth:8042")
 Creds = os.environ.get("TEST_ORTHANC_BASIC", "orthanc:change-me")
-STATION_AET = os.environ.get("TEST_STATION_AET", "MR_SCANNER_1")
 
 
 def build_instance():
@@ -40,7 +39,6 @@ def build_instance():
     ds.SeriesInstanceUID = generate_uid()
     ds.Modality = "CT"
     ds.Manufacturer = "Synthetic Vendor"
-    ds.StationAETitle = STATION_AET
     ds.InstitutionName = "Demo Clinic"
     ds.AccessionNumber = "ACC-TEST-0001"
     ds.PatientID = "P-TEST-0001"
@@ -97,23 +95,30 @@ def main():
         print("FAIL /changes reported no NewInstance entries", file=sys.stderr)
         return 1
 
-    instance_id = created[-1]["ID"]
-    inst = rest(f"/instances/{instance_id}")
-    # /metadata answers the list of metadata keys; the tags dict is /simplified-tags.
-    meta_back = rest(f"/instances/{instance_id}/simplified-tags")
-    tags = meta_back.get("Tags", {})
-    path = inst.get("Path", "")
+    # Address the instance by its SOP UID: a shared Orthanc accumulates NewInstance
+    # entries from every send, and the last one in /changes is not necessarily ours.
+    # Orthanc resolves a resource id given its DICOM UID.
+    inst = rest(f"/instances/{ds.SOPInstanceUID}")
+    instance_id = inst["ID"]
+    # /metadata answers the list of metadata keys; /tags?short answers the hex-keyed
+    # plain-value dict the checks below read.
+    meta_back = rest(f"/instances/{instance_id}/tags?short")
+    tags = meta_back
+    remote_aet = rest(f"/instances/{instance_id}/metadata/RemoteAET")
 
     # Print exactly the facts apps/worker depends on, so a future Orthanc version
-    # that changes any of them is visible in one line of output.
+    # that changes any of them is visible in one line of output. RemoteAET is the
+    # sender AET the worker attributes the study by; there is no standard
+    # StationAETitle tag (0008,1010 is StationName), so the sender fact is read
+    # from the node's metadata, not from the dataset.
     print("ok   c-store accepted")
     print(f"ok   /changes cursor last={changes['Last']} new_instances={len(created)}")
-    print(f"ok   instance path={path}")
+    print(f"ok   instance id={instance_id}")
     print(f"ok   tags PatientName={tags.get('0010,0010')!r} Modality={tags.get('0008,0060')!r} "
-          f"StationAET={tags.get('0008,1010')!r} Accession={tags.get('0008,0050')!r}")
+          f"Accession={tags.get('0008,0050')!r}")
     print(f"ok   study uid tag present={'yes' if tags.get('0020,000D') else 'no'}")
     print(f"ok   accession_number_matches_input={tags.get('0008,0050') == ds.AccessionNumber}")
-    print(f"ok   station_aet_matches_input={tags.get('0008,1010') == STATION_AET}")
+    print(f"ok   remote_aet={remote_aet!r} matches_site_registration={remote_aet == 'TELRAD_TEST'}")
     return 0
 
 
