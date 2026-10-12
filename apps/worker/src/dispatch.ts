@@ -1,5 +1,5 @@
 import {
-  OFFER_ACCEPT_SECONDS, pickReader, tzOffsetMinutes, widenStage,
+  MAX_OFFER_ATTEMPTS, OFFER_ACCEPT_SECONDS, pickReader, tzOffsetMinutes, widenStage,
   type DispatchStudy, type EscalationRule, type Priority, type ReaderCandidate,
 } from '@telrad/shared';
 
@@ -10,6 +10,7 @@ export type QueueStudy = {
   priority: Priority;
   subSpecialtyCode: string | null;
   modalityCode: string | null;
+  accessionNumber: string | null;
   tenantTimezone: string;
   receivedAt: Date;
   escalationStage: number;
@@ -30,6 +31,15 @@ export type DispatchPort = {
   /** The escalation stages this deployment configured, so the sweep knows whether the
    * pool has been widened for a case that is running out of time. */
   rules(): Promise<EscalationRule[]>;
+  /** Records the end of a case's offer ladder and returns false when that end was
+   * already written — the sweep runs every ten seconds and an exhausted case can sit
+   * exhausted for hours, so the dedupe lives with the row, not with the process. */
+  ladderExhausted(
+    study: { id: number; tenantId: number; accessionNumber: string | null },
+    attemptNo: number,
+    reason: 'pool_exhausted' | 'offer_ceiling',
+    gap: { userId: number; name: string; missing: string[] } | null,
+  ): Promise<boolean>;
 };
 
 export type UnassignedStudy = {
@@ -47,10 +57,13 @@ export type DispatchResult = {
    * the widen-pool stage. Named separately because it is the one routing decision an
    * operator would want to see without asking. */
   widened: number;
+  /** Cases whose offer ladder ended this sweep — the ceiling reached, or every eligible
+   * reader already asked — and for which the exhausted row was newly written. */
+  exhausted: number;
 };
 
 export function emptyDispatchResult(): DispatchResult {
-  return { expired: 0, offered: 0, unassigned: [], widened: 0 };
+  return { expired: 0, offered: 0, unassigned: [], widened: 0, exhausted: 0 };
 }
 
 // One sweep: withdraw what nobody took, then work the queue top-down. Expire runs
@@ -92,10 +105,20 @@ export async function dispatchSweep(
     });
 
     const record = prior.get(row.id);
+    const attemptNo = record?.maxAttempt ?? 0;
     // Widening is per case, read off its own clock stage: a routine study at 20 % of its
     // window does not get pushed onto a full reader just because a STAT elsewhere did.
     const widenAt = widenStage(rules, row.tenantId, row.priority);
     const allowAtCap = widenAt !== null && row.escalationStage >= widenAt;
+
+    // The ceiling ends the ladder before the board is consulted. Three readers were each
+    // given five minutes and the case came back each time; asking a fourth is churn the
+    // operator's page should replace. A manual assign is the way back in.
+    if (attemptNo >= MAX_OFFER_ATTEMPTS) {
+      if (await port.ladderExhausted(row, attemptNo, 'offer_ceiling', null)) r.exhausted += 1;
+      continue;
+    }
+
     const decision = pickReader(study, candidates, {
       now, alreadyOfferedTo: record?.userIds ?? [], allowAtCap,
     });
@@ -109,11 +132,21 @@ export async function dispatchSweep(
           ? { userId: closest.userId, name: closest.name, missing: closest.rejectedFor }
           : null,
       });
+      // Out of people: somebody was asked before and nobody eligible remains. A study
+      // that has never been offered has no ladder to end — its emptiness is a coverage
+      // fact the unassigned line above already states, and paging on it would page on
+      // every quiet night.
+      if (decision.reason === 'no_eligible_reader' && attemptNo > 0) {
+        if (await port.ladderExhausted(
+          row, attemptNo, 'pool_exhausted',
+          closest ? { userId: closest.userId, name: closest.name, missing: closest.rejectedFor } : null,
+        )) r.exhausted += 1;
+      }
       continue;
     }
 
     const created = await port.offer(row.id, row.tenantId, decision.chosenUserId,
-      (record?.maxAttempt ?? 0) + 1, now);
+      attemptNo + 1, now);
     if (created) {
       r.offered += 1;
       if (allowAtCap && decision.considered.find((c) => c.userId === decision.chosenUserId)?.widened) r.widened += 1;

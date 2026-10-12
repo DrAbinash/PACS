@@ -1,7 +1,7 @@
 import { and, asc, eq, gte, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import type { Db } from '@telrad/db';
 import {
-  appendAudit, assignments, criticalEvents, dispatchableStudies, escalationRules, ingestCursors, ingestEvents, offerHistory, orders,
+  appendAudit, assignments, auditLog, criticalEvents, dispatchableStudies, escalationRules, ingestCursors, ingestEvents, offerHistory, orders,
   panelReaders, patients, reports, reportDeliveries, slaClocks, slaTargets, studies, subSpecialties, tenants, tenantSites, uploadBatches, uploadFiles,
 } from '@telrad/db';
 import { LIMITS, type EscalationRule, type Priority } from '@telrad/shared';
@@ -323,6 +323,28 @@ export function createDispatchStore(db: Db): DispatchPort {
          )
         returning id`);
       return rows.length;
+    },
+
+    async ladderExhausted(study, attemptNo, reason, gap) {
+      // One exhausted row per attempt count, keyed on what the audit index already
+      // covers plus the attempt inside the detail. A sweep every ten seconds against a
+      // case that will sit all night must not write the same page all night.
+      const existing = await db.select({ id: auditLog.id })
+        .from(auditLog)
+        .where(and(
+          eq(auditLog.action, 'dispatch.exhausted'),
+          eq(auditLog.entity, 'studies'),
+          eq(auditLog.entityId, String(study.id)),
+          sql`${auditLog.detail}->>'attemptNo' = ${String(attemptNo)}`,
+        ))
+        .limit(1);
+      if (existing.length > 0) return false;
+      await appendAudit(db, {
+        actorUserId: null, actorKind: 'system', tenantId: study.tenantId,
+        action: 'dispatch.exhausted', entity: 'studies', entityId: String(study.id),
+        detail: { accession: study.accessionNumber, attemptNo, reason, gap },
+      });
+      return true;
     },
   };
 }

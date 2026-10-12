@@ -15,6 +15,9 @@ export type DispatchableStudyRow = {
   priority: 'stat' | 'urgent' | 'routine';
   subSpecialtyCode: string | null;
   modalityCode: string | null;
+  /** The center's own handle for the case. Routing decisions that reach a human — the
+   * exhausted-ladder row, the late board — are read against it, not against our ids. */
+  accessionNumber: string | null;
   tenantTimezone: string;
   receivedAt: Date;
   /** How far this case's clock has already been escalated. Zero when no stage has fired,
@@ -55,6 +58,7 @@ export async function dispatchableStudies(
     priority: studies.priority,
     subSpecialtyCode: studies.subSpecialtyCode,
     modalityCode: studies.modalityCode,
+    accessionNumber: studies.accessionNumber,
     tenantTimezone: tenants.timezone,
     receivedAt: studies.receivedAt,
     escalationStage: slaClocks.escalationStage,

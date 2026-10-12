@@ -19,6 +19,14 @@ export const OFFER_ACCEPT_SECONDS = 300;
 // what they said they could handle.
 export const MAX_OVER_CAPACITY = 1;
 
+// Where the offer ladder ends. Each attempt gives one reader five minutes; a case that
+// three readers in a row have let lapse is no longer a routing problem — it is a
+// coverage gap, a mislabelled study, or a priority nobody believes — and rotating it
+// through a fourth reader on a ten-second sweep just churns the board while the real
+// fault waits. Past the ceiling the dispatcher stops asking and records the end of the
+// ladder, which is what turns the case into an operator's decision.
+export const MAX_OFFER_ATTEMPTS = 3;
+
 export const ALL_CODES = '*';
 
 export type DispatchStudy = {

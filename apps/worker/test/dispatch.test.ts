@@ -18,6 +18,7 @@ const study = (over: Partial<QueueStudy> = {}): QueueStudy => ({
   priority: 'urgent',
   subSpecialtyCode: 'ct-head',
   modalityCode: 'CT',
+  accessionNumber: 'ACC-1',
   tenantTimezone: 'Asia/Kolkata',
   receivedAt: new Date('2026-10-09T07:50:00Z'),
   escalationStage: 0,
@@ -43,6 +44,7 @@ const reader = (over: Partial<ReaderCandidate> = {}): ReaderCandidate => ({
 });
 
 type Offer = { studyId: number; userId: number; attemptNo: number };
+type Exhaustion = { studyId: number; attemptNo: number; reason: string };
 
 // The port is faked rather than the database being started: what is under test is the
 // sweep's bookkeeping (load counted as it goes, attempts incremented, a refused insert
@@ -54,12 +56,17 @@ function fakePort(opts: {
   refuse?: boolean;
   expired?: number;
   rules?: EscalationRule[];
-}): { port: DispatchPort; offers: Offer[]; cutoffs: Date[] } {
+  /** How many ladderExhausted calls return true before the dedupe kicks in. */
+  exhaustionsAllowed?: number;
+}): { port: DispatchPort; offers: Offer[]; cutoffs: Date[]; exhaustions: Exhaustion[] } {
   const offers: Offer[] = [];
   const cutoffs: Date[] = [];
+  const exhaustions: Exhaustion[] = [];
+  let allowed = opts.exhaustionsAllowed ?? Infinity;
   return {
     offers,
     cutoffs,
+    exhaustions,
     port: {
       async queue() { return opts.queue ?? []; },
       async panel() { return opts.panel ?? []; },
@@ -71,6 +78,10 @@ function fakePort(opts: {
       },
       async expireUnaccepted(cutoff) { cutoffs.push(cutoff); return opts.expired ?? 0; },
       async rules() { return opts.rules ?? []; },
+      async ladderExhausted(study, attemptNo, reason) {
+        exhaustions.push({ studyId: study.id, attemptNo, reason });
+        return allowed-- > 0;
+      },
     },
   };
 }
@@ -156,10 +167,62 @@ describe('dispatchSweep', () => {
       async offer() { return true; },
       async expireUnaccepted() { return 0; },
       async rules() { return []; },
+      async ladderExhausted() { return false; },
     };
     const r = await dispatchSweep(port, { now: () => NOW });
-    expect(r).toEqual({ expired: 0, offered: 0, unassigned: [], widened: 0 });
+    expect(r).toEqual({ expired: 0, offered: 0, unassigned: [], widened: 0, exhausted: 0 });
     expect(panelCalls).toBe(0);
+  });
+});
+
+describe('offer ladder ceiling', () => {
+  // Three readers each had five minutes. A fourth auto-ask would churn the board every
+  // ten seconds while the real fault — coverage, a bad label, a priority nobody
+  // believes — waits for a person who has not been told.
+  it('stops offering at the attempt ceiling even with a fresh reader on the panel', async () => {
+    const h = fakePort({
+      queue: [study()],
+      panel: [reader({ userId: 31, name: 'Dr Fresh' })],
+      prior: new Map([[1, { userIds: [11, 21, 22], maxAttempt: 3 }]]),
+    });
+    const r = await dispatchSweep(h.port, { now: () => NOW });
+    expect(h.offers).toEqual([]);
+    expect(r.exhausted).toBe(1);
+    expect(h.exhaustions).toEqual([{ studyId: 1, attemptNo: 3, reason: 'offer_ceiling' }]);
+  });
+
+  it('writes the exhausted row once while the case sits at the ceiling', async () => {
+    const h = fakePort({
+      queue: [study()],
+      panel: [reader()],
+      prior: new Map([[1, { userIds: [10], maxAttempt: 3 }]]),
+      exhaustionsAllowed: 1,
+    });
+    const first = await dispatchSweep(h.port, { now: () => NOW });
+    const second = await dispatchSweep(h.port, { now: () => NOW });
+    expect(first.exhausted).toBe(1);
+    expect(second.exhausted).toBe(0);
+    expect(h.exhaustions).toHaveLength(2);
+  });
+
+  it('records the ladder end when the pool runs dry after a prior offer', async () => {
+    const h = fakePort({
+      queue: [study()],
+      panel: [reader({ userId: 21, name: 'A First' })],
+      prior: new Map([[1, { userIds: [21], maxAttempt: 1 }]]),
+    });
+    const r = await dispatchSweep(h.port, { now: () => NOW });
+    expect(r.offered).toBe(0);
+    expect(r.exhausted).toBe(1);
+    expect(h.exhaustions).toEqual([{ studyId: 1, attemptNo: 1, reason: 'pool_exhausted' }]);
+  });
+
+  it('does not page on a study that was never offered', async () => {
+    const h = fakePort({ queue: [study()], panel: [reader({ subspecialtyCodes: ['ct-spine'] })] });
+    const r = await dispatchSweep(h.port, { now: () => NOW });
+    expect(r.unassigned[0]?.reason).toBe('no_eligible_reader');
+    expect(r.exhausted).toBe(0);
+    expect(h.exhaustions).toEqual([]);
   });
 });
 

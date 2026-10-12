@@ -114,6 +114,7 @@ async function releaseStale(): Promise<void> {
 async function sweep(): Promise<void> {
   const d = await dispatchSweep(dispatch);
   if (d.widened > 0) console.log(`dispatch widened=${d.widened} (offers to at-capacity readers under a live widen_pool stage)`);
+  if (d.exhausted > 0) console.log(`dispatch exhausted=${d.exhausted} (offer ladder ended; operator action needed)`);
   if (d.expired > 0 || d.offered > 0 || d.unassigned.length > 0) {
     console.log(`dispatch offered=${d.offered} expired=${d.expired} unassigned=${d.unassigned.length}`
       + (d.unassigned.length > 0
