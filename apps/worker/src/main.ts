@@ -23,7 +23,12 @@ function env(name: string): string {
 
 const nodeId = process.env.TR_NODE_ID ?? 'node-nas-01';
 const pollSeconds = Math.max(Number(process.env.TR_WORKER_POLL_SECONDS ?? 10), 2);
-const handle = openDb(env('TR_DB_URL'));
+const poolMaxRaw = process.env.TR_DB_POOL_MAX;
+const poolMax = poolMaxRaw ? Number(poolMaxRaw) : undefined;
+if (poolMax !== undefined && (!Number.isInteger(poolMax) || poolMax < 1)) {
+  throw new Error('TR_DB_POOL_MAX must be a positive integer');
+}
+const handle = openDb(env('TR_DB_URL'), { max: poolMax });
 
 const orthanc = createOrthancReader({
   baseUrl: env('TR_ORTHANC_URL'),
@@ -334,14 +339,22 @@ if (process.argv[2] === 'dispatch-once') {
   await handle.close();
 } else {
   await tick();
-  const timer = setInterval(() => { void tick(); }, pollSeconds * 1000);
+  let tickPromise: Promise<void> | null = null;
+  const timer = setInterval(() => {
+    tickPromise = tick().finally(() => { tickPromise = null; });
+  }, pollSeconds * 1000);
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.on(signal, () => {
       if (stopping) return;
       stopping = true;
       clearInterval(timer);
-      console.log(`telrad worker ${signal}: closing`);
-      void handle.close().finally(() => process.exit(0));
+      console.log(`telrad worker ${signal}: draining`);
+      // The in-flight tick holds the pool's connections: closing the pool under
+      // it aborts a sweep half-done and leaves the queues it was stamping in a
+      // half-stamped state. Wait for the tick, then close; the unref'd timer
+      // below is the bound on a tick that never comes back.
+      const done = () => { void handle.close().finally(() => process.exit(0)); };
+      void (tickPromise ?? Promise.resolve()).then(done, done);
       setTimeout(() => process.exit(1), 10_000).unref();
     });
   }

@@ -143,7 +143,7 @@ The curl address is `https://localhost:8443` because TR_TLS_HOSTNAME defaults to
 a bare IP cannot complete the handshake (an IP URL sends no SNI). Set
 `TR_TLS_HOSTNAME` to the real name and browse that instead.
 
-`/health/ready` must return `{"ok":true,"components":{"db":true,"orthanc":true}}`.
+`/health/ready` must return `{"ok":true,"components":{"db":true,"orthanc":true,"worker":true},"workerState":"fresh"}`. The worker component reads the ingest cursor's last-run stamp: `fresh` within 90 seconds, `stale` (a 503) past it, `unknown` on a stack that has never ingested — which is still `ok`, because an install that has received no study is not an unhealthy one.
 Then create the first operator, tenant and storage node:
 
 ```bash

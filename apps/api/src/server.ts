@@ -8,7 +8,7 @@ import { createOrthancClient } from './orthanc.js';
 
 const env = loadEnv();
 const version = process.env.TR_RELEASE ?? 'dev';
-const handle = openDb(env.dbUrl);
+const handle = openDb(env.dbUrl, { max: env.dbPoolMax });
 
 // Fail fast, before the port is bound. A service that answers /health/live while
 // its own schema is missing is worse than one that refuses to start.

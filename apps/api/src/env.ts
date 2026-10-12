@@ -4,6 +4,7 @@ export type Env = {
   port: number;
   bindHost: string;
   dbUrl: string;
+  dbPoolMax: number | undefined;
   orthanc: { baseUrl: string; user: string; password: string };
   sessionSecret: string;
   uploadSigningSecret: string;
@@ -36,6 +37,14 @@ function strong(name: string, minLength = 24): string {
 }
 
 export function loadEnv(): Env {
+  // One pool knob for the api. Unset keeps the driver default (5); a busier
+  // deployment raises it without a code change, within Postgres max_connections.
+  const poolMaxRaw = process.env.TR_DB_POOL_MAX;
+  const dbPoolMax = poolMaxRaw === undefined || poolMaxRaw === '' ? undefined : Number(poolMaxRaw);
+  if (dbPoolMax !== undefined && (!Number.isInteger(dbPoolMax) || dbPoolMax < 1)) {
+    throw new Error('TR_DB_POOL_MAX must be a positive integer');
+  }
+
   return {
     port: Number(process.env.PORT ?? 3001),
     // Loopback is the safe default for a bare-host dev run; a container must
@@ -44,6 +53,7 @@ export function loadEnv(): Env {
     // healthcheck cannot catch.
     bindHost: process.env.TR_BIND_HOST ?? '127.0.0.1',
     dbUrl: required('TR_DB_URL'),
+    dbPoolMax,
     orthanc: {
       baseUrl: required('TR_ORTHANC_URL'),
       user: required('TR_ORTHANC_USER'),

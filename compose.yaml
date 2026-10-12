@@ -102,6 +102,7 @@ services:
       TR_UPLOAD_SIGNING_SECRET: ${TR_UPLOAD_SIGNING_SECRET}
       TR_PUBLIC_URL: ${TR_PUBLIC_URL}
       TR_LOG_LEVEL: ${TR_LOG_LEVEL:-info}
+      TR_DB_POOL_MAX: ${TR_DB_POOL_MAX:-}
       # Loopback (the code default) is unreachable from another container, so the
       # api would pass its own healthcheck while Caddy gets connection refused.
       TR_BIND_HOST: 0.0.0.0
@@ -149,6 +150,7 @@ services:
       TR_INBOX_ROOT: /app/inbox
       TR_INBOX_REMOVE_AFTER_PUSH: ${TR_INBOX_REMOVE_AFTER_PUSH:-true}
       TR_WORKER_POLL_SECONDS: ${TR_WORKER_POLL_SECONDS:-10}
+      TR_DB_POOL_MAX: ${TR_DB_POOL_MAX:-}
       # The notification outbox. Both are optional and their absence is a documented state,
       # not a silent one: with no relay the queue keeps its rows and says so at boot, so a
       # deployment can be brought up and verified before anybody decides who may send mail.
@@ -217,7 +219,11 @@ services:
     networks: [telrad]
 
   tunnel:
-    image: cloudflare/cloudflared:latest
+    # Pinned by digest like orthanc: this connector is the public front door,
+    # and an unpinned `latest` pull is an unreviewed change to it. Check any new
+    # digest before deploying:
+    #   docker manifest inspect cloudflare/cloudflared@<digest>
+    image: cloudflare/cloudflared@${CLOUDFLARED_IMAGE_DIGEST}
     container_name: tr-tunnel
     <<: *runtime
     # Its own profile, not nas: with an empty token cloudflared exits and

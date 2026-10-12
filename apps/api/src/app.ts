@@ -12,7 +12,9 @@ import {
 import { LINK_STATES, hashToken, newToken, verifyPassword, type LinkState } from '@telrad/shared';
 import express, { type Express, type Router } from 'express';
 import { ah, errorHandler } from './handler.js';
-import { COOKIE, readCookie, requireAuth, scopeTenant, type Ctx } from './auth.js';
+import {
+  COOKIE, SESSION_ABSOLUTE_MS, SESSION_TTL_MS, readCookie, requireAuth, scopeTenant, type Ctx,
+} from './auth.js';
 import { billingRouter } from './routes/billing.js';
 import { clinicalRouter } from './routes/clinical.js';
 import { criticalsRouter } from './routes/criticals.js';
@@ -30,7 +32,6 @@ import { viewRouter } from './routes/view.js';
 import { worklistRouter } from './routes/worklist.js';
 import type { OrthancClient } from './orthanc.js';
 
-const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
 const MAX_FAILED = 5;
 const LOCK_MINUTES = 15;
 
@@ -48,6 +49,12 @@ export function createApp(deps: AppDeps): Express {
   const { db, version, inboxRoot, secureCookies, orthanc } = deps;
   const app = express();
   app.disable('x-powered-by');
+  // Exactly one hop sits between the browser and this process — the Caddy
+  // entrypoint. Trusting that one hop takes the client address from the
+  // X-Forwarded-For entry Caddy appended and ignores anything a client spoofed
+  // ahead of it. Without it, every session row records Caddy's container
+  // address as the client and req.ip is useless to the login gate below.
+  app.set('trust proxy', 1);
 
   // Uploaded files stream to disk. Buffering a study in memory would take the API
   // down on the same machine that holds the archive, so JSON parsing is attached
@@ -65,14 +72,30 @@ export function createApp(deps: AppDeps): Express {
   // Readiness answers "is it well", not "what is behind it": no provider name, no
   // path, no credential echo. A container runtime has to be able to ask.
   app.get('/health/ready', ah(async (_req, res) => {
-    const checks = { db: false, orthanc: false };
+    const checks = { db: false, orthanc: false, worker: false };
     try {
       await db.execute(sql`select 1`);
       checks.db = true;
     } catch { checks.db = false; }
     checks.orthanc = await orthanc.ping().catch(() => false);
-    const ok = checks.db && checks.orthanc;
-    res.status(ok ? 200 : 503).json({ ok, version, components: checks });
+    // The worker has no HTTP surface to ping, but every tick stamps the ingest
+    // cursor it advances — that stamp is its heartbeat, already being written.
+    // A stamp older than 90 seconds (nine missed ten-second polls) means the
+    // pipeline that links and routes studies is dead even though this api is
+    // fine. No row at all is not an outage: a stack that has never ingested is
+    // a fresh one, and readiness must not fail on it.
+    let workerState: 'fresh' | 'stale' | 'unknown' = 'unknown';
+    if (checks.db) {
+      try {
+        const rows = await db.execute<{ last_run_at: Date | null }>(
+          sql`select max(last_run_at) as last_run_at from telrad.ingest_cursors`);
+        const last = rows[0]?.last_run_at;
+        if (last) workerState = Date.now() - last.getTime() < 90_000 ? 'fresh' : 'stale';
+      } catch { workerState = 'unknown'; }
+    }
+    checks.worker = workerState !== 'stale';
+    const ok = checks.db && checks.orthanc && checks.worker;
+    res.status(ok ? 200 : 503).json({ ok, version, components: checks, workerState });
   }));
 
   // Secure unless the configured public origin is plain http — which only happens
@@ -81,12 +104,26 @@ export function createApp(deps: AppDeps): Express {
   const cookieHeader = (token: string, maxAgeSeconds: number) =>
     `${COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict${secureCookies ? '; Secure' : ''}; Max-Age=${maxAgeSeconds}`;
 
+  // Per-IP failed-login gate, beside the per-account lock in the route below:
+  // the lock stops one name being hammered, this stops one address spraying
+  // every name. In-memory is the right weight — one api process behind one
+  // Caddy hop, and a restart costs an attacker nothing they had not already lost.
+  const LOGIN_WINDOW_MS = 15 * 60_000;
+  const LOGIN_MAX_FAILURES = 20;
+  const failedLogins = new Map<string, { count: number; resetAt: number }>();
+
   const router: Router = express.Router();
 
   router.post('/auth/login', ah(async (req, res, next) => {
     try {
       const email = String(req.body?.email ?? '').trim().toLowerCase();
       const password = String(req.body?.password ?? '');
+      const ip = req.ip ?? 'unknown';
+      const nowMs = Date.now();
+      const gate = failedLogins.get(ip);
+      if (gate && nowMs < gate.resetAt && gate.count >= LOGIN_MAX_FAILURES) {
+        return res.status(429).json({ ok: false, error: 'too_many_failures' });
+      }
       const [user] = await db.select().from(users).where(sql`lower(${users.email}) = ${email}`).limit(1);
       const passwordOk = user?.passwordHash ? await verifyPassword(password, user.passwordHash) : false;
 
@@ -102,6 +139,15 @@ export function createApp(deps: AppDeps): Express {
           actorUserId: user?.id ?? null, actorKind: 'system', tenantId: user?.tenantId ?? null,
           action: 'auth.login_failed', entity: 'users', entityId: String(user?.id ?? 'unknown'),
         });
+        const entry = failedLogins.get(ip) ?? { count: 0, resetAt: nowMs + LOGIN_WINDOW_MS };
+        if (nowMs >= entry.resetAt) { entry.count = 0; entry.resetAt = nowMs + LOGIN_WINDOW_MS; }
+        entry.count += 1;
+        failedLogins.set(ip, entry);
+        // An address rotating through IPv6 source space can grow the map without
+        // bound; past this size, drop the expired windows and keep only live ones.
+        if (failedLogins.size > 10_000) {
+          for (const [k, v] of failedLogins) if (nowMs >= v.resetAt) failedLogins.delete(k);
+        }
         // Identical response whether the address exists or not, so the endpoint
         // cannot be used to enumerate who works at a center.
         return res.status(401).json({ ok: false, error: 'invalid_credentials' });
@@ -123,7 +169,12 @@ export function createApp(deps: AppDeps): Express {
         userAgent: req.headers['user-agent']?.slice(0, 200) ?? null,
       });
       await db.update(users).set({ failedAttempts: 0, lastLoginAt: now }).where(eq(users.id, user.id));
-      res.setHeader('Set-Cookie', cookieHeader(token, SESSION_TTL_MS / 1000));
+      failedLogins.delete(ip);
+      // The cookie must outlive the longest session the slide can produce, or a
+      // session the database still honours becomes unpresentable at the browser.
+      // The database row remains the authority: it expires in SESSION_TTL_MS
+      // unless the session keeps being used.
+      res.setHeader('Set-Cookie', cookieHeader(token, SESSION_ABSOLUTE_MS / 1000));
       await appendAudit(db, {
         actorUserId: user.id, actorKind: 'human', tenantId: user.tenantId,
         action: 'auth.login', entity: 'users', entityId: String(user.id),

@@ -6,6 +6,15 @@ import { ah } from './handler.js';
 
 export const COOKIE = 'telrad_session';
 
+// A session lasts a working day and slides while its owner works: below half
+// the TTL remaining, an authenticated request renews the expiry a full TTL from
+// now, capped at seven days from first login so a token that keeps being used
+// cannot outlive the person who logged in. The token never changes — only the
+// row's expires_at moves — so no cookie re-issue is needed.
+export const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
+export const SESSION_SLIDE_MS = SESSION_TTL_MS / 2;
+export const SESSION_ABSOLUTE_MS = 7 * 24 * 60 * 60 * 1000;
+
 export type Principal = { userId: number; role: string; tenantId: number | null };
 export type AgentPrincipal = { tenantId: number; siteId: number | null; tokenId: number; label: string };
 export type Ctx = Request & { principal?: Principal; agent?: AgentPrincipal };
@@ -19,8 +28,12 @@ export function readCookie(req: Request, name: string): string | null {
 }
 
 export async function loadPrincipal(db: Db, token: string): Promise<Principal | null> {
-  const rows = await db.execute<{ user_id: number; role: string; tenant_id: number | null }>(sql`
-    select u.id as user_id, u.role, u.tenant_id
+  const rows = await db.execute<{
+    session_id: string; user_id: number; role: string; tenant_id: number | null;
+    expires_at: Date; created_at: Date;
+  }>(sql`
+    select s.id as session_id, u.id as user_id, u.role, u.tenant_id,
+           s.expires_at, s.created_at
       from telrad.sessions s
       join telrad.users u on u.id = s.user_id
      where s.token_hash = ${hashToken(token)}
@@ -30,6 +43,14 @@ export async function loadPrincipal(db: Db, token: string): Promise<Principal | 
      limit 1`);
   const found = rows[0];
   if (!found) return null;
+  if (found.expires_at.getTime() - Date.now() < SESSION_SLIDE_MS) {
+    await db.execute(sql`
+      update telrad.sessions
+         set expires_at = least(
+               now() + make_interval(secs => ${SESSION_TTL_MS / 1000}),
+               created_at + make_interval(secs => ${SESSION_ABSOLUTE_MS / 1000}))
+       where id = ${found.session_id}`);
+  }
   return { userId: found.user_id, role: found.role, tenantId: found.tenant_id };
 }
 
