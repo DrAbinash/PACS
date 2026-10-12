@@ -27,5 +27,10 @@ scripts/validation/out-*/
 # never be a `git add -A` away from history.
 .tmp-orth/
 
+# Backup artifacts from scripts/backup/backup.sh. The database dump is real PHI
+# by definition, so the whole directory stays out of history and out of the
+# cloud; copies belong on offline media, never in git.
+backups/
+
 # Python bytecode from the validation scripts importing each other.
 __pycache__/
