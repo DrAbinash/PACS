@@ -21,14 +21,13 @@
 {$TR_TLS_HOSTNAME:localhost}:8443 {
 	tls internal
 
-	# Caddy is the only path to Orthanc's REST and DICOMweb surface. The viewer
-	# never holds a credential: the proxy attaches one on the way through, and no
-	# host port is published for 8042.
-	handle_path /dicom-web/* {
-		reverse_proxy tr-orthanc:8042 {
-			header_up Authorization "Basic {env.TR_ORTHANC_BASIC_B64}"
-		}
-	}
+	# No /dicom-web/* route here. It used to proxy to Orthanc with an injected admin
+	# credential and no session check — any visitor of this site could reach the whole
+	# node (QIDO, retrieve, even C-STORE) across every tenant, because WADO URLs carry
+	# node UIDs that the api's per-case authorization cannot see. Nothing in apps/
+	# consumed it, so it is gone. The DICOMweb plugin stays enabled inside the docker
+	# network, where Orthanc's own authentication applies, and pixels reach the viewer
+	# only through /v1/view/*, which authorizes per case.
 
 	handle_path /api/* {
 		uri strip_prefix /api

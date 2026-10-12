@@ -323,7 +323,8 @@ export function viewRouter(db: Db, orthanc: OrthancClient): Router {
     if (!auth.row || auth.status !== 200) return denied(res, auth.status);
     const row = auth.row;
 
-    let pngBuf: Uint8Array;
+    let pixels: Uint8Array;
+    let format: 'int16-le' | 'jpeg' = 'int16-le';
     try {
       const tree = await treeFor(studyId, row.baseUrl, row.nodePk!);
       if (!belongsTo(tree, instancePk)) {
@@ -334,12 +335,31 @@ export function viewRouter(db: Db, orthanc: OrthancClient): Router {
       // window parameter on its rendering endpoints, so the pixels must cross as numbers
       // and the window is computed in the browser; but they can cross as a compressed PNG
       // rather than as text-shaped numbers.
-      pngBuf = await orthanc.nodeBytes(row.baseUrl, `/instances/${instancePk}/frames/${frameIndex}/image-int16`);
+      try {
+        pixels = await orthanc.nodeBytes(row.baseUrl, `/instances/${instancePk}/frames/${frameIndex}/image-int16`);
+      } catch (err) {
+        // A 415 here is not a broken case. The store's own JPG→DICOM path writes JPEG
+        // Baseline SC (YBR_FULL_422); GDCM decodes it, but the node's renderer has no
+        // YBR→RGB conversion, so every render endpoint refuses (node log, measured:
+        // "Unsupported DICOM image: 8bpp, 3 channels ... YBR_FULL_422"). The stored
+        // fragment is already a JPEG the browser can draw, so it crosses untouched.
+        if (!(err instanceof OrthancError) || err.status !== 415) throw err;
+        format = 'jpeg';
+        pixels = await orthanc.nodeBytes(row.baseUrl, `/instances/${instancePk}/content/7fe0,0010/${frameIndex}`);
+      }
     } catch (err) {
       return refuse(res, err, studyId);
     }
 
-    const decoded = decodePng16(pngBuf);
+    if (format === 'jpeg') {
+      res.setHeader('Content-Type', 'image/jpeg');
+      res.setHeader('X-Telrad-Pixel-Format', 'jpeg');
+      // Patient data, and a cached frame would outlive the assignment that made it readable.
+      res.setHeader('Cache-Control', 'no-store');
+      return res.send(Buffer.from(pixels));
+    }
+
+    const decoded = decodePng16(pixels);
     if (!decoded) {
       // A frame with no pixels is a real state — a localizer or a dose report stored
       // without pixel data — and it must arrive as a refusal, not as a black image a

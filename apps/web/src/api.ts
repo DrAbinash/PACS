@@ -640,7 +640,14 @@ export type AuditEntry = {
   detail?: unknown;
 };
 
-async function frame(studyId: number, pk: string, index: number): Promise<ArrayBuffer> {
+export type FrameBytes = {
+  // A numeric frame is a little-endian sample array the browser windows itself; a JPEG
+  // frame is a finished image the node stored but cannot decode.
+  format: 'int16-le' | 'jpeg';
+  bytes: ArrayBuffer;
+};
+
+async function frame(studyId: number, pk: string, index: number): Promise<FrameBytes> {
   const res = await fetch(`/v1/view/${studyId}/instances/${encodeURIComponent(pk)}/frames/${index}`, {
     credentials: 'same-origin',
   });
@@ -652,5 +659,6 @@ async function frame(studyId: number, pk: string, index: number): Promise<ArrayB
     try { body = text ? JSON.parse(text) as Record<string, unknown> : {}; } catch { /* an html error page */ }
     throw new ApiError(res.status, String(body.error ?? res.statusText), String(body.error ?? ''));
   }
-  return await res.arrayBuffer();
+  const format = res.headers.get('X-Telrad-Pixel-Format') === 'jpeg' ? 'jpeg' as const : 'int16-le' as const;
+  return { format, bytes: await res.arrayBuffer() };
 }

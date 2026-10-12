@@ -3,7 +3,7 @@ import { applyWindow, defaultWindow } from '@telrad/shared/pixels';
 import ReportPanel from './Report';
 import { api, ApiError, type ViewDescriptor, type ViewInstance } from './api';
 
-type Slice = { pk: string; meta: ViewInstance | null; pixels: Int16Array | Uint16Array | null };
+type Slice = { pk: string; meta: ViewInstance | null; pixels: Int16Array | Uint16Array | null; jpegUrl: string | null };
 
 /**
  * The case a reader accepted. It exists because the board's own promise — a case lands on
@@ -33,6 +33,7 @@ export default function Viewer({ studyId, onBack, onChanged }: {
   const [busy, setBusy] = useState(false);
   const canvas = useRef<HTMLCanvasElement | null>(null);
   const drag = useRef<{ x: number; y: number; center: number; width: number } | null>(null);
+  const blobUrl = useRef<string | null>(null);
 
   const series = descriptor?.series ?? [];
   const current = series[seriesIndex] ?? null;
@@ -64,23 +65,38 @@ export default function Viewer({ studyId, onBack, onChanged }: {
     let live = true;
     setBusy(true);
     void Promise.all([api.viewInstance(studyId, pk), api.viewFrame(studyId, pk, 0)])
-      .then(([meta, buf]) => {
+      .then(([meta, { format, bytes }]) => {
         if (!live) return;
-        // One buffer, two readings of it: PixelRepresentation says whether the stored
-        // values are signed, and getting that wrong turns a chest film inside out.
-        const values = meta.pixelRepresentation === 1 ? new Int16Array(buf) : new Uint16Array(buf);
-        setSlice({ pk, meta, pixels: values });
-        setLevel((old) => old ?? defaultWindow({
-          windowCenter: meta.windowCenter,
-          windowWidth: meta.windowWidth,
-          minStored: 0,
-          maxStored: (1 << (meta.bitsStored ?? 16)) - 1,
-          rescaleSlope: meta.rescaleSlope ?? 1,
-          rescaleIntercept: meta.rescaleIntercept ?? 0,
-        }));
-        setError(values.length !== (meta.rows ?? 0) * (meta.columns ?? 0)
-          ? `the node sent ${values.length} values for a ${meta.rows}×${meta.columns} image`
-          : null);
+        // Two kinds of frame cross this route. A numeric one is read as an array of
+        // stored values — PixelRepresentation says whether they are signed, and getting
+        // that wrong turns a chest film inside out. A JPEG one is already a finished
+        // picture — the node stores the JPG→DICOM uploads verbatim because it cannot
+        // decode them — so it is kept as a blob URL and drawn as an image.
+        let pixels: Int16Array | Uint16Array | null = null;
+        let jpegUrl: string | null = null;
+        if (format === 'jpeg') {
+          if (blobUrl.current) URL.revokeObjectURL(blobUrl.current);
+          jpegUrl = URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' }));
+          blobUrl.current = jpegUrl;
+        } else {
+          pixels = meta.pixelRepresentation === 1 ? new Int16Array(bytes) : new Uint16Array(bytes);
+        }
+        setSlice({ pk, meta, pixels, jpegUrl });
+        if (pixels) {
+          setLevel((old) => old ?? defaultWindow({
+            windowCenter: meta.windowCenter,
+            windowWidth: meta.windowWidth,
+            minStored: 0,
+            maxStored: (1 << (meta.bitsStored ?? 16)) - 1,
+            rescaleSlope: meta.rescaleSlope ?? 1,
+            rescaleIntercept: meta.rescaleIntercept ?? 0,
+          }));
+          setError(pixels.length !== (meta.rows ?? 0) * (meta.columns ?? 0)
+            ? `the node sent ${pixels.length} values for a ${meta.rows}×${meta.columns} image`
+            : null);
+        } else {
+          setError(null);
+        }
       })
       .catch((err) => {
         if (!live) return;
@@ -88,12 +104,16 @@ export default function Viewer({ studyId, onBack, onChanged }: {
         setError(err instanceof ApiError ? describe(err) : 'cannot reach the server');
       })
       .finally(() => { if (live) setBusy(false); });
-    return () => { live = false; };
+    return () => {
+      live = false;
+      if (blobUrl.current) { URL.revokeObjectURL(blobUrl.current); blobUrl.current = null; }
+    };
   }, [studyId, pk]);
 
   const invert = slice?.meta?.photometric === 'MONOCHROME1';
 
   useEffect(() => {
+    if (slice?.jpegUrl) return; // drawn as a finished image in the effect below
     const el = canvas.current;
     const meta = slice?.meta;
     const values = slice?.pixels;
@@ -114,6 +134,22 @@ export default function Viewer({ studyId, onBack, onChanged }: {
     image.data.set(rgba);
     ctx.putImageData(image, 0, 0);
   }, [slice, level, invert]);
+
+  // A JPEG frame already carries its own rendering, so it is drawn as sent — the
+  // level/window machinery has nothing to compute for it.
+  useEffect(() => {
+    const el = canvas.current;
+    const url = slice?.jpegUrl;
+    if (!el || !url) return;
+    const img = new Image();
+    img.onload = () => {
+      el.width = img.naturalWidth;
+      el.height = img.naturalHeight;
+      const ctx = el.getContext('2d');
+      if (ctx) ctx.drawImage(img, 0, 0);
+    };
+    img.src = url;
+  }, [slice]);
 
   const go = useCallback((next: number) => {
     if (!current) return;
@@ -181,7 +217,7 @@ export default function Viewer({ studyId, onBack, onChanged }: {
               className="screen"
               onWheel={(e) => { e.preventDefault(); go(sliceIndex + (e.deltaY > 0 ? 1 : -1)); }}
               onPointerDown={(e) => {
-                if (!level) return;
+                if (!level || slice?.jpegUrl) return;
                 e.currentTarget.setPointerCapture(e.pointerId);
                 drag.current = { x: e.clientX, y: e.clientY, center: level.center, width: level.width };
               }}
@@ -214,14 +250,20 @@ export default function Viewer({ studyId, onBack, onChanged }: {
                 <span className="sub">slice {(current ? sliceIndex : 0) + 1} / {current?.count ?? 0}</span>
               </div>
               <div className="row">
-                <label>level
-                  <input type="number" value={level?.center ?? 0}
-                    onChange={(e) => setLevel((l) => ({ center: Number(e.target.value), width: l?.width ?? 1 }))} />
-                </label>
-                <label>window
-                  <input type="number" value={level?.width ?? 1} min={1}
-                    onChange={(e) => setLevel((l) => ({ center: l?.center ?? 0, width: Math.max(1, Number(e.target.value)) }))} />
-                </label>
+                {slice?.jpegUrl ? (
+                  <span className="sub">stored image — drawn as sent, no windowing applies</span>
+                ) : (
+                  <>
+                    <label>level
+                      <input type="number" value={level?.center ?? 0}
+                        onChange={(e) => setLevel((l) => ({ center: Number(e.target.value), width: l?.width ?? 1 }))} />
+                    </label>
+                    <label>window
+                      <input type="number" value={level?.width ?? 1} min={1}
+                        onChange={(e) => setLevel((l) => ({ center: l?.center ?? 0, width: Math.max(1, Number(e.target.value)) }))} />
+                    </label>
+                  </>
+                )}
                 {invert && <span className="state amber">inverted (MONOCHROME1)</span>}
                 <span className="sub">
                   {slice?.meta?.rows ?? '—'}×{slice?.meta?.columns ?? '—'}
