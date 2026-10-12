@@ -89,10 +89,12 @@ def main():
         print(f"FAIL C-STORE status {code}", file=sys.stderr)
         return 1
 
+    # Orthanc 1.13.0 /changes entries carry ChangeType ("NewInstance") and a Seq
+    # number; there is no "Change" key and the top-level cursor is "Last".
     changes = rest("/changes?limit=20")
-    created = [c for c in changes["Changes"] if c["Change"] == "Create"]
+    created = [c for c in changes["Changes"] if c.get("ChangeType") == "NewInstance"]
     if not created:
-        print("FAIL /changes reported no Create entries", file=sys.stderr)
+        print("FAIL /changes reported no NewInstance entries", file=sys.stderr)
         return 1
 
     instance_id = created[-1]["ID"]
@@ -104,7 +106,7 @@ def main():
     # Print exactly the facts apps/worker depends on, so a future Orthanc version
     # that changes any of them is visible in one line of output.
     print("ok   c-store accepted")
-    print(f"ok   /changes cursor touchstone={changes['LastTouchstone']} creates={len(created)}")
+    print(f"ok   /changes cursor last={changes['Last']} new_instances={len(created)}")
     print(f"ok   instance path={path}")
     print(f"ok   tags PatientName={tags.get('0010,0010')!r} Modality={tags.get('0008,0060')!r} "
           f"StationAET={tags.get('0008,1010')!r} Accession={tags.get('0008,0050')!r}")

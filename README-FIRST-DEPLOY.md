@@ -112,7 +112,12 @@ nothing external may connect until it is not.
 ```bash
 docker compose --profile nas run --rm api node apps/api/dist/cli.js migrate
 docker compose --profile nas up -d api caddy
-curl -sk https://localhost:8443/health/ready
+# Probe with the name the certificate was issued for, not localhost: with any
+# TR_TLS_HOSTNAME other than localhost, a loopback URL sends an SNI Caddy has no
+# certificate for and the handshake dies with `tlsv1 alert internal error`.
+# --resolve pins that name to loopback, which .local does not resolve from a shell.
+curl -sk --resolve "$TR_TLS_HOSTNAME:8443:127.0.0.1" \
+  "https://$TR_TLS_HOSTNAME:8443/health/ready"
 ```
 
 The migration runs inside a one-off api container and nowhere else. The database
@@ -203,13 +208,19 @@ If `unresolved_site=1`, that is the RemoteAET above not matching any
 
 If you have no scanner wired yet, `scripts/validation/send-test-study.py` sends one
 invented study over C-STORE and prints the four contract facts the worker depends
-on. It was used to verify every claim in this section:
+on. It was used to verify every claim in this section. The compose network to join
+is the one the running stack actually got — measure it with
+`docker network ls | grep telrad`; compose v2.20.1 names it after the project
+alone (`telrad`), while newer releases append `_default`:
 
 ```bash
-MSYS_NO_PATHCONV=1 docker run --rm -v "$PWD/scripts/validation:/v" -e TEST_ORTHANC_BASIC="orthanc:$TR_ORTHANC_PASSWORD" \
+docker run --rm -v "$PWD/scripts/validation:/v" -e TEST_ORTHANC_BASIC="orthanc:$TR_ORTHANC_PASSWORD" \
   -e TEST_ORTHANC_REST="http://tr-orthanc:8042" -e TEST_ORTHANC_HOST="tr-orthanc" \
-  --network telrad_default python:3.11-slim sh -c "pip -q install pydicom pynetdicom && python /v/send-test-study.py"
+  --network telrad python:3.11-slim sh -c "pip -q install pydicom pynetdicom && python /v/send-test-study.py"
 ```
+
+(The Orthanc password is sourced from `.env`, never typed: `set -a && . ./.env && set +a`
+before the run, and it reaches only the container's environment.)
 
 ## 7. Prove the upload channel, which is the one a center without a PACS uses
 
@@ -333,6 +344,7 @@ origin as the api — which is not a style choice. The session cookie is `HttpOn
 token where any browser extension can read it.
 
 ```bash
+pnpm --filter @telrad/shared build       # on the workstation: pixels/report types
 pnpm --filter @telrad/web build          # on the workstation: writes apps/web/dist
 ```
 
@@ -342,9 +354,15 @@ container — same result, nothing left behind:
 
 ```bash
 docker run --rm -v "$PWD:/repo" -w /repo node:22-alpine sh -c \
-  "corepack enable && pnpm install --frozen-lockfile=false && pnpm --filter @telrad/web build"
+  "corepack enable && pnpm install --frozen-lockfile=false \
+   && pnpm --filter @telrad/shared build && pnpm --filter @telrad/web build"
 docker compose --profile nas up -d caddy # serves it at https://$TR_TLS_HOSTNAME:8443
 ```
+
+The shared package is built first on purpose: `@telrad/shared/pixels` resolves
+through `packages/shared/dist`, and on a fresh clone that dist does not exist —
+the web build fails with `Cannot find module '@telrad/shared/pixels'` until the
+shared package is compiled.
 
 Build it before starting Caddy. An empty `apps/web/dist` mounts fine and answers 404
 for every page, which looks like a broken deployment rather than a missing build step.
