@@ -586,12 +586,29 @@ have deployed.
 
 ## 10. Backup before any real study
 
-Three copies, and the third one off the premises: nightly `pg_dump` of the telrad
-schema, a Btrfs snapshot task on `${TR_RUNTIME}/orthanc`, and a restic copy to a
-destination the NAS cannot remount read-write. `scripts/doctor/check-secrets.sh`
-runs against the repo, not your data — the data copies need their own schedule,
-and a restore you have actually performed and timed. Until that rehearsal exists,
-this deployment holds test data only.
+Three copies, and the third one off the premises. The live stack is the first.
+The second is `scripts/backup/backup.sh`: a `pg_dump` of the telrad schema, a
+tarball of the Orthanc store, and a count manifest frozen at backup time —
+with a keep-newest-7 prune, so the NAS folder stays bounded as the store
+grows. Run it nightly from DSM Task Scheduler (scheduled task, user-defined
+script, run as the deploy user):
+
+    cd /volume1/docker/telrad && sh scripts/backup/backup.sh
+
+Prove every artifact with `scripts/backup/restore-drill.sh`, which restores
+the newest pair into sealed, network-less throwaway containers and counts
+every table and image against the manifest — on this repository's NAS that
+measured 219 s RTO with 37/37 tables matching.
+
+The third copy is Duplicati (`--profile backup`): it pushes `backups/` to a
+machine the NAS cannot remount read-write — here the clinic Windows PC over
+SFTP — AES-256-encrypted with a passphrase only the operator holds, on its
+own nightly schedule and retention. Set the GUI password before first start
+(`TR_DUPLICATI_PASSWORD`); the UI can read every backup. When the platform
+moves to the cloud VM, Duplicati moves with it and its destination becomes
+object storage, taking the NAS out of the backup path entirely. Until a
+restore has been rehearsed from the third copy too, this deployment holds
+test data only.
 
 ## 11. Publishing with a Cloudflare Tunnel (optional)
 

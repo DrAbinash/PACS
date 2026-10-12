@@ -237,6 +237,26 @@ services:
         condition: service_started
     networks: [telrad]
 
+  duplicati:
+    # The third copy: pushes ./backups off-box on its own schedule. Its
+    # destination (here, the clinic Windows PC over SFTP) and its encryption
+    # passphrase are configured in the GUI and stored in /config — never here.
+    image: lscr.io/linuxserver/duplicati:latest
+    container_name: tr-duplicati
+    <<: *runtime
+    profiles: ["backup"]
+    environment:
+      # The GUI can read every backup and configure any destination, so an
+      # unauthenticated LAN browser must not reach it. Never commit the value.
+      DUPLICATI__WEBSERVICE_PASSWORD: ${TR_DUPLICATI_PASSWORD:-}
+      TZ: UTC
+    volumes:
+      - ${TR_RUNTIME}/duplicati:/config
+      - ./backups:/source/backups:ro
+    ports:
+      - "${TR_DUPLICATI_PORT:-18300}:8200"
+    networks: [telrad]
+
 networks:
   telrad:
     name: telrad

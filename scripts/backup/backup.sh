@@ -90,4 +90,11 @@ T3=$(date +%s)
 echo "backup: $(basename "$DUMP") ($(wc -c < "$DUMP") bytes, $((T2 - T1))s)"
 echo "backup: $(basename "$TARF") ($(wc -c < "$TARF") bytes, $((T3 - T2))s)"
 echo "manifest: $(basename "$MAN")"
+# The NAS folder is the second copy, not the archive: nightly runs would grow
+# it without bound as the store grows. Keep the newest 7 sets; the off-NAS
+# copy (Duplicati) holds the versioned history.
+ls -1t "$BACKUPS"/*-manifest.txt 2>/dev/null | tail -n +8 | while read -r m; do
+  stem=$(basename "$m" -manifest.txt)
+  rm -f "$BACKUPS/$stem-telrad-db.dump" "$BACKUPS/$stem-orthanc.tar.gz" "$m"
+done
 echo "total: $(( $(date +%s) - START ))s — now prove it: sh scripts/backup/restore-drill.sh"
