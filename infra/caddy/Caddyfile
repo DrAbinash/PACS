@@ -5,6 +5,13 @@
 	# dies with a TLS alert while the logs stay silent about why (measured).
 	# Redirects stay disabled so Caddy never binds port 80.
 	auto_https disable_redirects
+	# A URL with a raw IP sends no SNI, and without SNI Caddy serves no
+	# certificate — every https://<nas-ip>:8443 handshake died before any page
+	# (measured 2026-10-13). default_sni answers SNI-less clients with the named
+	# site's certificate; the browser still warns, because the SAN is the
+	# hostname and not the IP, and one click-through admits the visitor — the
+	# same click-through the name itself already needs.
+	default_sni {$TR_TLS_HOSTNAME:localhost}
 	servers {
 		trusted_proxies static private_ranges
 	}
@@ -15,12 +22,16 @@
 # and replaces `tls internal` with a real DNS challenge.
 #
 # The site address carries a hostname, not just a port: a bare `:8443` gives
-# Caddy no name to certify, and a plain IP cannot work either, because an IP
-# URL sends no SNI. TR_TLS_HOSTNAME is the name centers type into their
-# browser; it must resolve to this host and match TR_PUBLIC_URL.
-{$TR_TLS_HOSTNAME:localhost}:8443 {
-	tls internal
+# Caddy no name to certify. TR_TLS_HOSTNAME is the name centers type into their
+# browser; it must resolve to this host and match TR_PUBLIC_URL. Raw-IP URLs
+# work too, via default_sni above.
 
+# Shared handlers for both faces of the deployment: the TLS face LAN browsers
+# hit on 8443, and the plain-HTTP face only cloudflared reaches. Port 8080 is
+# never published by compose, so nothing off the docker network can touch it —
+# the public TLS terminates at Cloudflare and the last hop rides inside the
+# network.
+(tr_site) {
 	# No /dicom-web/* route here. It used to proxy to Orthanc with an injected admin
 	# credential and no session check — any visitor of this site could reach the whole
 	# node (QIDO, retrieve, even C-STORE) across every tenant, because WADO URLs carry
@@ -67,4 +78,17 @@
 		}
 		format json
 	}
+}
+
+{$TR_TLS_HOSTNAME:localhost}:8443 {
+	tls internal
+	import tr_site
+}
+
+# The tunnel face. The explicit http:// scheme means Caddy neither provisions a
+# certificate here nor redirects to TLS (auto_https redirects are already off).
+# A hostless catch-all matches whatever Host header cloudflared forwards — the
+# public pacs.* name — without the origin needing to know its own public name.
+http://:8080 {
+	import tr_site
 }

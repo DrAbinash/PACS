@@ -211,6 +211,27 @@ services:
         condition: service_healthy
     networks: [telrad]
 
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: tr-tunnel
+    <<: *runtime
+    # Its own profile, not nas: with an empty token cloudflared exits and
+    # restart-loops forever. The service exists only when the operator opts in
+    # with `--profile tunnel`, which is the point where a token is also required.
+    profiles: ["tunnel"]
+    # --no-autoupdate: the container is replaced by pulls, not patched from
+    # inside; a self-updating binary behind a restart policy is a surprise reboot.
+    command: tunnel --no-autoupdate run
+    environment:
+      # Remotely-managed tunnel: the token carries account, tunnel and secret,
+      # and ingress (which public hostname maps to tr-caddy:8080) is configured
+      # in the Cloudflare dashboard, not here. Never commit the real token.
+      TUNNEL_TOKEN: ${TR_TUNNEL_TOKEN:-}
+    depends_on:
+      caddy:
+        condition: service_started
+    networks: [telrad]
+
 networks:
   telrad:
     name: telrad

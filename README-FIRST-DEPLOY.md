@@ -593,6 +593,28 @@ runs against the repo, not your data — the data copies need their own schedule
 and a restore you have actually performed and timed. Until that rehearsal exists,
 this deployment holds test data only.
 
+## 11. Publishing with a Cloudflare Tunnel (optional)
+
+The deployment is a LAN service by default: the console answers on
+`https://$TR_TLS_HOSTNAME:$TR_HTTPS_PORT`, and raw-IP URLs work too (`https://<nas-ip>:8443`)
+because Caddy answers SNI-less handshakes with the named certificate — the browser
+warns and one click-through admits the visitor, the same as for the name.
+
+To put a public name on it without opening a port on the router, run a cloudflared
+tunnel as a container: one outbound connection, public TLS terminates at Cloudflare,
+and the origin face is an unpublished plain-HTTP Caddy listener (`http://tr-caddy:8080`)
+that nothing off the docker network can reach.
+
+1. Cloudflare Zero Trust dashboard → Networks → Tunnels → Create a tunnel
+   (cloudflared), name it, copy the token.
+2. Public hostname: `pacs.example.com` → service type `HTTP`, URL `tr-caddy:8080`.
+3. Add the token to `.env` as `TR_TUNNEL_TOKEN` (never commit it), then:
+   `docker compose --profile nas --profile tunnel up -d tunnel`
+
+The console login is then the only gate on the public name; a Cloudflare Access
+policy in front of it is the next layer if that ever feels thin. When the public
+name becomes the primary address, update `TR_PUBLIC_URL` so emailed links point at it.
+
 ## What is not here yet
 
 Built and proven on test data: the on-panel board and its heartbeat, the dispatcher that
