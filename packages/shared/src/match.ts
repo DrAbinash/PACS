@@ -1,4 +1,4 @@
-import type { LinkState } from './enums.js';
+import type { LinkState, Priority } from './enums.js';
 
 export type CandidateOrder = {
   orderId: number;
@@ -9,6 +9,7 @@ export type CandidateOrder = {
   studyDate?: string | null;
   modalityCode?: string | null;
   siteId?: number | null;
+  priority?: Priority | null;
 };
 
 export type IncomingStudy = {

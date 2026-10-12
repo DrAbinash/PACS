@@ -95,6 +95,7 @@ export function createStore(db: Db, nodeId: string): StorePort {
         orderedAt: orders.orderedAt,
         modalityCode: orders.modalityCode,
         siteId: orders.siteId,
+        priority: orders.priority,
       }).from(orders)
         .leftJoin(patients, eq(patients.id, orders.patientId))
         .where(and(

@@ -7,7 +7,7 @@ type Captured = {
   drafts: Map<string, StudyDraft>;
   firstSeen: Map<string, Date>;
   events: { studyId: number; kind: string; detail: unknown }[];
-  clocks: { studyId: number; deadline: Date }[];
+  clocks: { studyId: number; priority: string; deadline: Date }[];
   cursor: number | null;
   stableAsked: string[];
   cleared: number[];
@@ -84,10 +84,10 @@ function fakes(opts: {
       return { id, created: true, receivedAt: firstSeen };
     },
     async event(studyId, kind, detail) { cap.events.push({ studyId, kind, detail }); },
-    async openSlaClock(studyId, _t, _p, deadline) {
+    async openSlaClock(studyId, _t, priority, deadline) {
       // The unique index on study_id: a second open for the same study changes nothing.
       if (cap.clocks.some((c) => c.studyId === studyId)) return false;
-      cap.clocks.push({ studyId, deadline });
+      cap.clocks.push({ studyId, priority, deadline });
       return true;
     },
     async stalledStudies() { return opts.stalled ?? []; },
@@ -147,6 +147,23 @@ describe('pollOnce', () => {
     expect(cap.clocks).toHaveLength(1);
     expect(cap.events.map((e) => e.kind)).toEqual(['linked']);
     expect(cap.cursor).toBe(1);
+  });
+
+  // The order is the work order: its priority is the referrer's clinical urgency
+  // and the DICOM carries nothing equivalent. A study left at the classified
+  // default would dispatch, bill and breach at routine while an urgent order
+  // waited on it.
+  it('runs a linked study at the order priority, not the classified default', async () => {
+    const { orthanc, store, cap } = fakes({
+      instances: [instance(brainTags)],
+      orders: async () => [{ ...matchingOrder, priority: 'urgent' }],
+    });
+    await pollOnce(orthanc, store, { nodeId: 'node-test' });
+
+    expect(cap.drafts.get('1.2.3.4')!.priority).toBe('urgent');
+    expect(cap.clocks).toEqual([
+      expect.objectContaining({ studyId: 100, priority: 'urgent' }),
+    ]);
   });
 
   it('keeps a study from an unknown sending AE title out of every real tenant', async () => {

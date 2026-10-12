@@ -154,6 +154,10 @@ export async function pollOnce(
         orders,
       );
       const matched = match.orderId !== null ? orders.find((o) => o.orderId === match.orderId) : undefined;
+      // The order is the work order: its priority is the referrer's clinical urgency
+      // and nothing in the DICOM carries it. Without this the study runs — dispatch,
+      // SLA clock, tariffs — at routine even when an urgent order is waiting on it.
+      const studyPriority = matched?.priority ?? classification.priority;
 
       const receivedAt = now();
       const draft: StudyDraft = {
@@ -165,7 +169,7 @@ export async function pollOnce(
         modalityCode: classification.modalityCode,
         subSpecialtyCode: classification.subSpecialtyCode,
         studyDescription: tags.StudyDescription ?? null,
-        priority: classification.priority,
+        priority: studyPriority,
         linkState: match.state,
         matchMethod: match.method,
         matchScore: match.score,
@@ -199,10 +203,10 @@ export async function pollOnce(
         // rather than this pass's clock keeps the deadline honest either way, and
         // the unique index on study_id means a later poll cannot open a second one.
         if (flags.length === 0) {
-          const minutes = await store.slaMinutesFor(site.tenantId, classification.modalityCode, classification.subSpecialtyCode, classification.priority);
+          const minutes = await store.slaMinutesFor(site.tenantId, classification.modalityCode, classification.subSpecialtyCode, studyPriority);
           if (minutes) {
             const opened = await store.openSlaClock(
-              id, site.tenantId, classification.priority,
+              id, site.tenantId, studyPriority,
               new Date(written.receivedAt.getTime() + minutes * 60_000),
             );
             if (opened) r.slaOpened += 1;
