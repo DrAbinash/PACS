@@ -9,8 +9,9 @@ import { drainOnce } from './inbox.js';
 import { createReleaseStore, releaseSweepOnce } from './release.js';
 import { reviewSweepOnce } from './review.js';
 import { createOrthancReader, createOrthancWriter } from './orthanc.js';
+import { opsDigestOnce } from './ops.js';
 import { createSmtpTransport } from './smtp.js';
-import { createCriticalStore, createDispatchStore, createEscalationStore, createInboxStore, createNotifyStore, createStore } from './store.js';
+import { createCriticalStore, createDispatchStore, createEscalationStore, createInboxStore, createNotifyStore, createOpsStore, createStore } from './store.js';
 
 function env(name: string): string {
   const v = process.env[name];
@@ -39,6 +40,7 @@ const escalation = createEscalationStore(handle.db);
 const criticals = createCriticalStore(handle.db);
 const notifications = createNotifyStore(handle.db);
 const release = createReleaseStore(handle.db);
+const ops = createOpsStore(handle.db);
 // Both halves have to be present before anything leaves. A relay without a public origin would
 // send a message whose only actionable line — "read it here" — is a relative link, which is a
 // letter with no address on it rather than a bug in the mailer.
@@ -47,6 +49,11 @@ const smtp = createSmtpTransport({
   from: process.env.TR_SMTP_FROM ?? null,
 });
 const publicUrl = (process.env.TR_PUBLIC_URL ?? '').replace(/\/+$/, '');
+// The ops digest rides the same relay as the clinic mail but carries none of its content: it
+// reads the sweeps' alert audit rows back to one operator address on a bounded cadence. An
+// empty address is a documented state — alerts stay audit-only and the boot line says so.
+const opsEmail = process.env.TR_OPS_EMAIL || null;
+const opsDigestMinutes = Math.max(Number(process.env.TR_OPS_DIGEST_MINUTES ?? 5), 1);
 
 async function notify(): Promise<void> {
   if (!smtp.configured) return;
@@ -59,6 +66,20 @@ async function notify(): Promise<void> {
   if (n.sent + n.retried + n.dead + n.refused > 0) {
     console.log(`notify checked=${n.checked} sent=${n.sent} retried=${n.retried} dead=${n.dead} `
       + `refused=${n.refused} via=${smtp.label}`);
+  }
+}
+
+// The digest is read off the same audit log every sweep writes to, so it runs last in a tick —
+// after the sweeps have finished writing — and holds itself to a minimum interval, because an
+// operator who receives ten mails learns to filter the address and an operator who receives
+// none learns nothing. A held or failed digest logs nothing: the cursor has not moved and the
+// next tick reads the same rows.
+async function opsDigest(): Promise<void> {
+  const d = await opsDigestOnce(ops, smtp, { to: opsEmail, now: new Date(), intervalMs: opsDigestMinutes * 60_000 });
+  if (d.sent) {
+    console.log(`ops digest sent alerts=${d.alerts} cursor=${d.cursor} via=${smtp.label}`);
+  } else if (d.alerts > 0) {
+    console.log(`ops digest send failed alerts=${d.alerts} (attempt recorded; retry at digest interval)`);
   }
 }
 const inboxRoot = env('TR_INBOX_ROOT');
@@ -204,10 +225,17 @@ async function tick(): Promise<void> {
   } finally {
     ticking = false;
   }
+
+  try {
+    await opsDigest();
+  } catch (err) {
+    console.error('ops digest failed', err instanceof Error ? err.message : err);
+  }
 }
 
 console.log(`telrad worker starting node=${nodeId} poll=${pollSeconds}s mode=${process.argv[2] ?? 'loop'} `
-  + `mail=${smtp.configured ? `smtp via ${smtp.label}` : 'not configured (queued notifications will wait)'}`);
+  + `mail=${smtp.configured ? `smtp via ${smtp.label}` : 'not configured (queued notifications will wait)'} `
+  + `ops=${opsEmail ? `digest to ${opsEmail} every ${opsDigestMinutes}m` : 'not configured (alerts stay audit-only)'}`);
 
 if (process.argv[2] === 'dispatch-once') {
   // The routing half of a tick with no ingest beside it: the critical clocks, then
@@ -222,6 +250,12 @@ if (process.argv[2] === 'dispatch-once') {
   // The outbox on its own. A verification run that proves a clinic was told must not also
   // dispatch, because then the state it ends by asserting is one it caused.
   await notify();
+  await handle.close();
+} else if (process.argv[2] === 'ops-once') {
+  // Only the digest. A verification run uses this to see exactly what would be mailed; with
+  // a relay configured it sends real mail, and the interval and cursor still apply, so a
+  // repeat run within the interval holds rather than double-sending.
+  await opsDigest();
   await handle.close();
 } else if (process.argv[2] === 'criticals-once') {
   // Only the acknowledgement clocks. A verification run uses this to stamp a breach without

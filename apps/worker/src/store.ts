@@ -1,4 +1,4 @@
-import { and, asc, eq, gte, inArray, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import type { Db } from '@telrad/db';
 import {
   appendAudit, assignments, auditLog, criticalEvents, dispatchableStudies, escalationRules, ingestCursors, ingestEvents, offerHistory, orders,
@@ -11,6 +11,7 @@ import type { NotifyPort, QueuedNotification } from './notify.js';
 import type { DispatchPort } from './dispatch.js';
 import type { OrderCandidate, StorePort } from './ingest.js';
 import type { InboxStore } from './inbox.js';
+import { DIGEST_ACTION, OPS_ALERT_ACTIONS, type OpsPort } from './ops.js';
 import { attributeByBatch, batchIdsFromLabels } from './labels.js';
 
 export function createStore(db: Db, nodeId: string): StorePort {
@@ -566,5 +567,69 @@ export function createNotifyStore(db: Db): NotifyPort {
     },
 
     async audit(input) { await appendAudit(db, input); },
+  };
+}
+
+export function createOpsStore(db: Db): OpsPort {
+  return {
+    async alertsSince(sinceAuditId, limit) {
+      const rows = await db.select({
+        id: auditLog.id,
+        occurredAt: auditLog.occurredAt,
+        action: auditLog.action,
+        entity: auditLog.entity,
+        entityId: auditLog.entityId,
+        detail: auditLog.detail,
+      })
+        .from(auditLog)
+        // Ordered by id, not time: the digest prints what happened in chain order, and the
+        // id is also the cursor, so a row can never be skipped and re-read in the same pass.
+        .where(and(gt(auditLog.id, sinceAuditId), inArray(auditLog.action, [...OPS_ALERT_ACTIONS])))
+        .orderBy(asc(auditLog.id))
+        .limit(limit);
+      return rows.map((row) => ({
+        ...row,
+        detail: (row.detail ?? null) as Record<string, unknown> | null,
+      }));
+    },
+
+    async digestState() {
+      const [latest] = await db.select({ detail: auditLog.detail, occurredAt: auditLog.occurredAt })
+        .from(auditLog)
+        .where(eq(auditLog.action, DIGEST_ACTION))
+        .orderBy(desc(auditLog.id))
+        .limit(1);
+      if (!latest) return { cursor: 0, cursorAt: null, lastAttemptAt: null };
+      const detail = latest.detail as { ok?: unknown; lastAuditId?: unknown } | null;
+      if (detail?.ok === true && typeof detail.lastAuditId === 'number') {
+        return { cursor: detail.lastAuditId, cursorAt: latest.occurredAt, lastAttemptAt: latest.occurredAt };
+      }
+      // The latest attempt failed. The cursor is still the last digest somebody actually
+      // received, so it is read from further back rather than reset to zero — resetting would
+      // re-mail the operator every alert the log has ever held.
+      const [lastOk] = await db.select({ detail: auditLog.detail, occurredAt: auditLog.occurredAt })
+        .from(auditLog)
+        .where(and(
+          eq(auditLog.action, DIGEST_ACTION),
+          sql`(${auditLog.detail} ->> 'ok') = 'true'`,
+        ))
+        .orderBy(desc(auditLog.id))
+        .limit(1);
+      if (!lastOk) return { cursor: 0, cursorAt: null, lastAttemptAt: latest.occurredAt };
+      const okDetail = lastOk.detail as { lastAuditId?: unknown } | null;
+      const cursor = typeof okDetail?.lastAuditId === 'number' ? okDetail.lastAuditId : 0;
+      return { cursor, cursorAt: lastOk.occurredAt, lastAttemptAt: latest.occurredAt };
+    },
+
+    // A platform-level row (tenantId null): the digest is the operator's own channel, and
+    // filing it under a tenant would make one center's audit trail carry every center's
+    // failures.
+    async recordDigest(record) {
+      await appendAudit(db, {
+        actorUserId: null, actorKind: 'system', tenantId: null,
+        action: DIGEST_ACTION, entity: 'ops', entityId: null,
+        detail: record,
+      });
+    },
   };
 }
