@@ -398,12 +398,16 @@ the only place a path appears.
   would be `matchesRecord: false` in a later download audit. Storing the rendered PDF (and a
   second hash column for the stored copy) is the fix, and it needs a place to put bytes that is
   not a jsonb column.
-- **A report waiting for a second name is visible, and still untimed.** The desk board lists it
-  with the reason and delivery refuses until it is cleared, which is the enforcement the column
-  lacked. What is still missing is the clock: `dueStages` stops at `signed_at` (right for the
-  contract), so nothing escalates a report that has sat uncountersigned for six hours. The
-  review queue shows a reviewer what is waiting; nobody tells the operator that it has been
-  waiting since 02:13.
+- **A report waiting for a second name is visible, watched, and keyed to the rule the delivery
+  gate enforces.** The desk board lists it with the reason and delivery refuses until it is
+  cleared, which is the enforcement the column lacked. The contract clock still stops at
+  `signed_at` (right: the center was answered on time), but the worker's review sweep tells the
+  operator when a signed report has sat uncountersigned past two hours — one audit row per
+  report per hour, so the chain records how long the operator knew. The sweep asks
+  `sub_specialties.requires_reviewer`, the same rule `deliverDecision` asks: on a sub-specialty
+  that needs no second name a signed report is deliverable, not stuck, and paging "waiting for
+  a reviewer" on it would misread a normal state as a fault. What is still missing is any
+  outbound channel — the alert is an audit row and the operator's own attention, not a page.
 - **Critical findings are declared, gated and timed — and the system still phones nobody.** The
   loop is real: a reader declares from a closed list, names who they told, the report cannot be
   released until somebody at the referring end is recorded as having answered, and a call nobody

@@ -1,6 +1,6 @@
 import { and, eq, isNull, lt, sql } from 'drizzle-orm';
 import type { Db } from '@telrad/db';
-import { appendAudit, auditLog, reports, studies } from '@telrad/db';
+import { appendAudit, auditLog, reports, studies, subSpecialties } from '@telrad/db';
 
 // A signed report waiting for a second name is a different thing from an unsigned one:
 // the center was already answered on time, so the contract clock correctly stops at the
@@ -30,6 +30,10 @@ export type ReviewSweepResult = {
 export async function reviewSweepOnce(db: Db): Promise<ReviewSweepResult> {
   const threshold = new Date(Date.now() - WAITING_THRESHOLD_MS);
 
+  // The rule the query asks is the rule the delivery gate enforces: on a sub-specialty that
+  // needs no second name, a signed report is deliverable, not stuck, and paging "waiting for
+  // a reviewer" on it misreads a normal state as a fault. The inner join also drops a study
+  // with no sub-specialty — the same `?? false` the report view applies to a missing rule.
   const rows = await db.select({
     reportId: reports.id,
     studyId: reports.studyId,
@@ -38,9 +42,11 @@ export async function reviewSweepOnce(db: Db): Promise<ReviewSweepResult> {
     accession: studies.accessionNumber,
   }).from(reports)
     .innerJoin(studies, eq(studies.id, reports.studyId))
+    .innerJoin(subSpecialties, eq(subSpecialties.code, studies.subSpecialtyCode))
     .where(and(
       eq(reports.state, 'signed'),
       isNull(reports.reviewerUserId),
+      eq(subSpecialties.requiresReviewer, true),
       lt(reports.signedAt, threshold),
     ))
     .limit(100);
