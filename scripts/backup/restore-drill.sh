@@ -86,7 +86,11 @@ docker run -d --name tr-drill-db --network none \
   postgres:16-alpine >/dev/null
 ready=""
 for i in $(seq 1 60); do
-  if docker exec tr-drill-db pg_isready -U drill -d drill >/dev/null 2>&1; then ready=1; break; fi
+  # pg_isready answers "accepting" even for the temporary initdb server, where
+  # the drill database does not exist yet (measured on the NAS: pg_restore then
+  # died with FATAL: database "drill" does not exist). psql only succeeds once
+  # the real server serves the drill database.
+  if docker exec tr-drill-db psql -U drill -d drill -Atc "SELECT 1" >/dev/null 2>&1; then ready=1; break; fi
   sleep 2
 done
 [ -n "$ready" ] || { echo "FAIL: drill postgres never became ready"; exit 1; }
