@@ -13,9 +13,11 @@ fail=0
 # ignore this script. Nothing boots on a missing secret anyway: loadEnv throws.
 if [[ -f .env ]]; then
   # TR_SMTP_URL/TR_SMTP_FROM are the documented optional pair: empty means "no relay
-  # configured", the worker says so at boot and notices stay queued. Every other
-  # empty value is a placeholder the stack would inherit, so those still refuse.
-  bad=$(grep -En '<generated|changeme|^\s*[A-Z_]+=\s*$' .env | grep -Ev '^[0-9]+:(TR_SMTP_URL|TR_SMTP_FROM)=$' || true)
+  # configured", the worker says so at boot and notices stay queued. The WhatsApp
+  # triple and TR_OPS_EMAIL are dormant the same way: compose defaults them empty and
+  # the worker states at boot that no channel is configured. Every other empty value
+  # is a placeholder the stack would inherit, so those still refuse.
+  bad=$(grep -En '<generated|changeme|^\s*[A-Z_]+=\s*$' .env | grep -Ev '^[0-9]+:(TR_SMTP_URL|TR_SMTP_FROM|TR_OPS_EMAIL|TR_WHATSAPP_TOKEN|TR_WHATSAPP_PHONE_ID|TR_WHATSAPP_TEMPLATE)=$' || true)
   if [[ -n "$bad" ]]; then
     echo "FAIL .env still contains a placeholder or an empty value"
     printf '%s\n' "$bad" | sed 's/^/  /'
