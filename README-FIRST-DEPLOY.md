@@ -63,10 +63,18 @@ carries forward — see docs/ARCHITECTURE.md "Known open items".
 ## 3. Start the image plane
 
 ```bash
-mkdir -p "$TR_RUNTIME"/{postgres,orthanc,caddy}
+mkdir -p "$TR_RUNTIME"/{postgres,orthanc,inbox} "$TR_RUNTIME"/caddy/{config,data}
 docker compose --profile nas up -d db orthanc
 docker compose logs --tail=60 orthanc      # read every line
 ```
+
+`inbox` is the spool the api writes uploaded batches into and the worker pushes
+from; both containers run as uid 1000 (`node`). Synology's ACLs can display a
+directory as `drwxrwxrwx` while the kernel — what the container sees — reports
+`755`, and the api then answers every batch open with a 500
+(`EACCES ... mkdir '/app/inbox/...'`). `chmod 777 "$TR_RUNTIME/inbox"` and probe
+from inside the container before trusting it:
+`docker compose exec api sh -c 'touch /app/inbox/.probe && rm /app/inbox/.probe'`.
 
 Three things must be true in that log, and each has been seen to fail:
 
@@ -235,12 +243,18 @@ docker run --rm -v "$PWD/scripts/validation:/v" -e OUT_DIR=/v/out \
   -e ACCESSION=ACC-TEST-0001 -e PATIENT_ID=P-TEST-0001 -e PATIENT_NAME="Ramesh^Kumar" \
   python:3.11-slim sh -c "pip -q install pydicom && python /v/make-study-files.py"
 
-python scripts/validation/run-p1-flow.py --api https://localhost:8443 --insecure \
+python scripts/validation/run-p1-flow.py --api https://AbinashNAS.local:8443 --insecure \
   --email <bootstrap email> --password '<bootstrap passphrase>' \
   --dir scripts/validation/out --files img001.dcm,img002.dcm,img003.dcm \
   --accession ACC-TEST-0001
-docker compose --profile nas run --rm worker once      # TR_INBOX_ROOT must be the same directory the api writes into
+docker compose --profile nas run --rm worker node apps/worker/dist/main.js once      # full CMD: a bare `once` replaces the whole command and the entrypoint turns it into `node run` — MODULE_NOT_FOUND
 ```
+
+The `--api` host must be `$TR_TLS_HOSTNAME`, never `localhost`: Caddy's internal CA
+issues a certificate for that hostname only, so a loopback URL makes every request
+fail the handshake with `tlsv1 alert internal error`. From the NAS itself use
+`--resolve "$TR_TLS_HOSTNAME:8443:127.0.0.1"` (a `.local` name does not resolve from
+a NAS shell); from any workstation on the LAN, mDNS resolves it already.
 
 `run-p1-flow.py` exits non-zero on any unexpected status, and it drives every upload
 step with a site token on a client that has **no cookie jar**. That is deliberate: an
