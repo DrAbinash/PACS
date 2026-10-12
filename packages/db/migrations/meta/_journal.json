@@ -29,6 +29,27 @@
       "when": 1791582066305,
       "tag": "0003_lowly_sentinel",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1791897600000,
+      "tag": "0004_competitor_features",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1791984000000,
+      "tag": "0005_film_exports",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1792070400000,
+      "tag": "0006_sla_targets",
+      "breakpoints": true
     }
   ]
 }

@@ -18,6 +18,10 @@ import {
 import Viewer from './Viewer';
 import { CriticalBoard } from './Critical';
 import { Billing } from './Billing';
+import { Performance } from './Performance';
+import { SlaTargets } from './SlaTargets';
+import { FilmExports } from './FilmExports';
+import { AuditBoard } from './AuditBoard';
 import { explainCode, retryLabel } from './Report';
 
 const HEARTBEAT_MS = 20_000;
@@ -83,6 +87,8 @@ function Worklist({ onChanged, onOpen }: { onChanged: () => void; onOpen: (study
   const [reason, setReason] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [, setTick] = useState(0);
+  const [picked, setPicked] = useState<Set<number>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -102,6 +108,32 @@ function Worklist({ onChanged, onOpen }: { onChanged: () => void; onOpen: (study
     const second = setInterval(() => setTick((t) => t + 1), 1000);
     return () => { clearInterval(poll); clearInterval(second); };
   }, [load]);
+
+  const offered = cases.filter((c) => c.state === 'offered');
+  const toggle = (id: number) => {
+    setPicked((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  async function bulkAccept() {
+    if (picked.size === 0) return;
+    setBulkBusy(true);
+    setError(null);
+    try {
+      const res = await api.bulkAccept([...picked]);
+      setPicked(new Set());
+      await load();
+      onChanged();
+      if (res.failed > 0) setError(`${res.accepted} accepted, ${res.failed} could not be`);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'cannot reach the server');
+    } finally {
+      setBulkBusy(false);
+    }
+  }
 
   async function accept(id: number) {
     setError(null);
@@ -138,11 +170,26 @@ function Worklist({ onChanged, onOpen }: { onChanged: () => void; onOpen: (study
     <div className="card">
       <h2>Your cases</h2>
       {error && <div className="error">{error}</div>}
+      {offered.length > 1 && (
+        <div className="filters">
+          <button className="primary" disabled={bulkBusy || picked.size === 0} onClick={() => void bulkAccept()}>
+            {bulkBusy ? 'Accepting…' : `Accept selected (${picked.size})`}
+          </button>
+          <button disabled={picked.size === offered.length} onClick={() => setPicked(new Set(offered.map((c) => c.assignmentId)))}>
+            Select all offers
+          </button>
+          <button disabled={picked.size === 0} onClick={() => setPicked(new Set())}>Clear</button>
+        </div>
+      )}
       {cases.length === 0 && !error && <div className="sub">Nothing is held by you right now.</div>}
       {cases.map((c) => {
         const remaining = left(c);
         return (
           <div className="workcase" key={c.assignmentId}>
+            {c.state === 'offered' && offered.length > 1 && (
+              <input type="checkbox" checked={picked.has(c.assignmentId)}
+                onChange={() => toggle(c.assignmentId)} />
+            )}
             <span className={`priority ${c.priority}`}>{c.priority}</span>
             <div className="who">
               <strong>{c.patientName ?? 'name not carried in the study'}</strong>
@@ -507,7 +554,13 @@ function NoticeQueue({ show, canOpen, onOpen }: {
 // whether the system has done anything about it yet. A case that cannot be routed shows
 // the closest reader and the reason they were skipped, because "unassigned" on its own is
 // not an answer anyone can act on at 2 a.m.
-function Waiting({ show, onOpen }: { show: boolean; onOpen: (studyId: number) => void }) {
+function Waiting({ show, panel, onOpen }: {
+  show: boolean;
+  // The routing dropdown reads the same presence feed the board above renders, so a name
+  // offered here is a name the desk can see is green somewhere above it.
+  panel: PanelRow[];
+  onOpen: (studyId: number) => void;
+}) {
   const [late, setLate] = useState<LateCase[]>([]);
   const [blocked, setBlocked] = useState<BlockedCase[]>([]);
   const [unheld, setUnheld] = useState(0);
@@ -516,6 +569,10 @@ function Waiting({ show, onOpen }: { show: boolean; onOpen: (studyId: number) =>
     modality: string | null; subSpecialty: string | null; signedAt: string | null;
     authorName: string; waitingMinutes: number | null;
   }[]>([]);
+  const [picked, setPicked] = useState<Set<number>>(new Set());
+  const [readerId, setReaderId] = useState('');
+  const [assignError, setAssignError] = useState<string | null>(null);
+  const [assignBusy, setAssignBusy] = useState(false);
 
   useEffect(() => {
     if (!show) return;
@@ -539,6 +596,35 @@ function Waiting({ show, onOpen }: { show: boolean; onOpen: (studyId: number) =>
   }, [show]);
 
   if (!show || (late.length === 0 && blocked.length === 0 && reviewWaiting.length === 0)) return null;
+
+  const radiologists = panel.filter((p) => p.role === 'radiologist');
+
+  const toggle = (studyId: number) => {
+    setPicked((prev) => {
+      const next = new Set(prev);
+      if (next.has(studyId)) next.delete(studyId); else next.add(studyId);
+      return next;
+    });
+  };
+
+  async function bulkAssign() {
+    const clinicianUserId = Number(readerId);
+    if (picked.size === 0 || !Number.isInteger(clinicianUserId)) return;
+    setAssignBusy(true);
+    setAssignError(null);
+    try {
+      const res = await api.bulkAssign([...picked], clinicianUserId);
+      setPicked(new Set());
+      const failed = res.results.filter((r) => !r.ok);
+      if (failed.length > 0) {
+        setAssignError(`${res.assigned} assigned, ${failed.length} not (${failed[0]?.error ?? 'unknown'})`);
+      }
+    } catch (err) {
+      setAssignError(err instanceof ApiError ? err.message : 'cannot reach the server');
+    } finally {
+      setAssignBusy(false);
+    }
+  }
 
   return (
     <div className="card">
@@ -605,8 +691,26 @@ function Waiting({ show, onOpen }: { show: boolean; onOpen: (studyId: number) =>
       {blocked.length > 0 && (
         <>
           <h3 className="sub">Cannot route automatically</h3>
+          <div className="filters">
+            <select value={readerId} onChange={(e) => setReaderId(e.target.value)}>
+              <option value="">Assign to…</option>
+              {radiologists.map((p) => (
+                <option key={p.userId} value={p.userId}>
+                  {p.name} ({p.label}, {p.openCases}/{p.maxQueueSize})
+                </option>
+              ))}
+            </select>
+            <button className="primary" disabled={assignBusy || picked.size === 0 || !readerId}
+              onClick={() => void bulkAssign()}>
+              {assignBusy ? 'Assigning…' : `Assign selected (${picked.size})`}
+            </button>
+            {picked.size > 0 && <button onClick={() => setPicked(new Set())}>Clear</button>}
+          </div>
+          {assignError && <div className="error">{assignError}</div>}
           {blocked.map((b) => (
             <div className="workcase" key={b.studyId}>
+              <input type="checkbox" checked={picked.has(b.studyId)}
+                onChange={() => toggle(b.studyId)} />
               <span className={`priority ${b.priority}`}>{b.priority}</span>
               <div className="who">
                 <strong>study {b.studyId}</strong>
@@ -805,7 +909,15 @@ export default function App() {
 
         {isDesk && <NoticeQueue show={isDesk} canOpen={isOperator} onOpen={setOpenStudy} />}
 
-        {isOperator && <Waiting show={isOperator} onOpen={setOpenStudy} />}
+        {isOperator && <Waiting show={isOperator} panel={rows} onOpen={setOpenStudy} />}
+
+        {isOperator && <Performance show={isOperator} />}
+
+        {isOperator && <SlaTargets show={isOperator} tenantId={session.user.tenantId} />}
+
+        {isOperator && <FilmExports show={isOperator} canOpen={isOperator} onOpen={setOpenStudy} />}
+
+        {isOperator && <AuditBoard show={isOperator} />}
 
         {isOperator && session.user.tenantId !== null && <Billing tenantId={session.user.tenantId} />}
 

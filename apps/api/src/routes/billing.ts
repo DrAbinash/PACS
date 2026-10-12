@@ -746,7 +746,5 @@ export function billingRouter(db: Db): Router {
     });
   }));
 
-  r.use((_req, res) => res.status(404).json({ ok: false, error: 'not_found' }));
-
   return r;
 }

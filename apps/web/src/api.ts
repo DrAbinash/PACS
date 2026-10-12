@@ -409,6 +409,14 @@ export const api = {
     call<{ ok: boolean; state: string }>('/v1/presence', { method: 'PATCH', body: JSON.stringify({ state }) }),
   panel: () => call<Panel>('/v1/panel'),
   myWork: () => call<{ cases: WorkCase[]; offerWindowSeconds: number }>('/v1/my/work'),
+  // Up to 50 offers in one go: a reader coming back from a break should not click through
+  // the backlog one accept at a time, and each accept is still audited on its own row.
+  bulkAccept: (ids: number[]) =>
+    call<{ ok: boolean; accepted: number; failed: number; results: { id: number; ok: boolean; error?: string }[] }>(
+      '/v1/assignments/bulk-accept', { method: 'POST', body: JSON.stringify({ ids }) }),
+  bulkAssign: (studyIds: number[], clinicianUserId: number) =>
+    call<{ ok: boolean; assigned: number; failed: number; results: { studyId: number; ok: boolean; error?: string }[] }>(
+      '/v1/assignments/bulk-assign', { method: 'POST', body: JSON.stringify({ studyIds, clinicianUserId }) }),
   accept: (id: number) =>
     call<{ ok: boolean; studyId: number; lockToken: string }>(`/v1/assignments/${id}/accept`, { method: 'POST', body: '{}' }),
   decline: (id: number, reason: string) =>
@@ -552,6 +560,84 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ tenantId, amountRupees, method: method ?? 'upi', reference: reference ?? null }),
     }),
+
+  // Reader performance: who is carrying weight, over a window the desk chooses.
+  performance: (from?: string, to?: string) => {
+    const q = new URLSearchParams();
+    if (from) q.set('from', from);
+    if (to) q.set('to', to);
+    const qs = q.toString();
+    return call<{ ok: boolean; from: string; to: string; readers: ReaderPerf[] }>(
+      `/v1/performance/readers${qs ? `?${qs}` : ''}`);
+  },
+
+  slaTargets: () =>
+    call<{ ok: boolean; targets: SlaTarget[] }>('/v1/sla/targets'),
+  createSlaTarget: (input: { modalityCode: string; priority: string; slaMinutes: number; tenantId?: number }) =>
+    call<{ ok: boolean; target: SlaTarget }>('/v1/sla/targets', {
+      method: 'POST', body: JSON.stringify(input),
+    }),
+  deactivateSlaTarget: (id: number) =>
+    call<{ ok: boolean }>(`/v1/sla/targets/${id}`, { method: 'DELETE' }),
+
+  filmExports: () =>
+    call<{ ok: boolean; exports: FilmExport[] }>('/v1/film/exports'),
+  createFilmExport: (studyId: number, medium: string, quantity: number) =>
+    call<{ ok: boolean; filmExportId: number; unitPaise: number; totalPaise: number }>(
+      '/v1/film/exports', { method: 'POST', body: JSON.stringify({ studyId, medium, quantity }) }),
+
+  auditLatest: () =>
+    call<{ ok: boolean; entries: AuditEntry[] }>('/v1/audit/latest'),
+  auditExportHref: (format: 'csv' | 'json') =>
+    `/v1/audit/export?format=${format}`,
+};
+
+export type ReaderPerf = {
+  userId: number;
+  name: string;
+  offered: number;
+  accepted: number;
+  declined: number;
+  completed: number;
+  acceptanceRate: number;
+  avgAcceptSeconds: number | null;
+  avgReadSeconds: number | null;
+  studiesPerDay: number;
+};
+
+export type SlaTarget = {
+  id: number;
+  tenantId: number;
+  modalityCode: string;
+  priority: 'stat' | 'urgent' | 'routine';
+  slaMinutes: number;
+  effectiveFrom: string;
+  effectiveTo: string | null;
+};
+
+export type FilmExport = {
+  id: number;
+  studyId: number;
+  medium: string;
+  quantity: number;
+  unitPaise: number;
+  totalPaise: number;
+  requestedByName: string;
+  patientName: string | null;
+  studyDescription: string | null;
+  exportedAt: string;
+};
+
+export type AuditEntry = {
+  id: number;
+  action: string;
+  entity: string;
+  entityId: string;
+  actorUserId: number | null;
+  occurredAt: string;
+  rowHash: string;
+  prevHash: string;
+  detail?: unknown;
 };
 
 async function frame(studyId: number, pk: string, index: number): Promise<ArrayBuffer> {
