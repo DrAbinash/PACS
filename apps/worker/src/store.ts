@@ -2,7 +2,7 @@ import { and, asc, eq, gte, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import type { Db } from '@telrad/db';
 import {
   appendAudit, assignments, criticalEvents, dispatchableStudies, escalationRules, ingestCursors, ingestEvents, offerHistory, orders,
-  panelReaders, patients, reports, reportDeliveries, slaClocks, studies, subSpecialties, tenants, tenantSites, uploadBatches, uploadFiles,
+  panelReaders, patients, reports, reportDeliveries, slaClocks, slaTargets, studies, subSpecialties, tenants, tenantSites, uploadBatches, uploadFiles,
 } from '@telrad/db';
 import { LIMITS, type EscalationRule, type Priority } from '@telrad/shared';
 import type { EscalatableClock, EscalationPort } from './escalate.js';
@@ -119,10 +119,25 @@ export function createStore(db: Db, nodeId: string): StorePort {
       })) satisfies OrderCandidate[];
     },
 
-    async slaMinutesFor(code, priority) {
-      if (!code) return null;
+    async slaMinutesFor(tenantId, modalityCode, subSpecialtyCode, priority) {
+      // A tenant's own target wins outright: it was set per modality and priority by
+      // someone who read the contract, so the stat/urgent fractions below must not
+      // dilute it. Targets only ever apply at a tenant, never to the platform default.
+      if (tenantId !== null && modalityCode) {
+        const [target] = await db.select({ minutes: slaTargets.slaMinutes })
+          .from(slaTargets)
+          .where(and(
+            eq(slaTargets.tenantId, tenantId),
+            eq(slaTargets.modalityCode, modalityCode),
+            eq(slaTargets.priority, priority),
+            isNull(slaTargets.effectiveTo),
+          ))
+          .limit(1);
+        if (target) return target.minutes;
+      }
+      if (!subSpecialtyCode) return null;
       const [row] = await db.select({ minutes: subSpecialties.defaultSlaMinutes })
-        .from(subSpecialties).where(eq(subSpecialties.code, code)).limit(1);
+        .from(subSpecialties).where(eq(subSpecialties.code, subSpecialtyCode)).limit(1);
       if (!row) return null;
       // A STAT contract is a stated fraction of the routine window rather than a
       // separate number per tenant, which is how two clocks drift apart.
@@ -208,6 +223,7 @@ export function createStore(db: Db, nodeId: string): StorePort {
         tenantId: studies.tenantId,
         linkState: studies.linkState,
         priority: studies.priority,
+        modalityCode: studies.modalityCode,
         subSpecialtyCode: studies.subSpecialtyCode,
         qualityFlags: studies.qualityFlags,
         receivedAt: studies.receivedAt,

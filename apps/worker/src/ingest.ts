@@ -37,7 +37,7 @@ export type StorePort = {
   failCursor(message: string): Promise<void>;
   resolveSite(prov: Provenance): Promise<{ tenantId: number; siteId: number | null } | null>;
   candidateOrders(tenantId: number, tags: DicomTags): Promise<OrderCandidate[]>;
-  slaMinutesFor(subSpecialtyCode: string | null, priority: Priority): Promise<number | null>;
+  slaMinutesFor(tenantId: number | null, modalityCode: string | null, subSpecialtyCode: string | null, priority: Priority): Promise<number | null>;
   /** Idempotent on (storageNodeId, studyInstanceUid). A resumed cursor must not
    * create a second study row, and must not reopen a clock. `receivedAt` is the
    * first time this study was ever seen, which on an update pass is older than the
@@ -68,6 +68,7 @@ export type StalledStudy = {
   tenantId: number | null;
   linkState: 'linked' | 'orphan' | 'ambiguous' | 'unlinked_read_only';
   priority: Priority;
+  modalityCode: string | null;
   subSpecialtyCode: string | null;
   qualityFlags: string[];
   receivedAt: Date;
@@ -198,7 +199,7 @@ export async function pollOnce(
         // rather than this pass's clock keeps the deadline honest either way, and
         // the unique index on study_id means a later poll cannot open a second one.
         if (flags.length === 0) {
-          const minutes = await store.slaMinutesFor(classification.subSpecialtyCode, classification.priority);
+          const minutes = await store.slaMinutesFor(site.tenantId, classification.modalityCode, classification.subSpecialtyCode, classification.priority);
           if (minutes) {
             const opened = await store.openSlaClock(
               id, site.tenantId, classification.priority,
@@ -260,7 +261,7 @@ export async function recheckStalled(
     if (row.tenantId !== null && row.linkState === 'linked') {
       const remaining = row.qualityFlags.filter((f) => f !== 'study_not_complete');
       if (remaining.length === 0) {
-        const minutes = await store.slaMinutesFor(row.subSpecialtyCode, row.priority);
+        const minutes = await store.slaMinutesFor(row.tenantId, row.modalityCode, row.subSpecialtyCode, row.priority);
         if (minutes) {
           const opened = await store.openSlaClock(
             row.id, row.tenantId, row.priority,

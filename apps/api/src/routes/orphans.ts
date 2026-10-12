@@ -1,4 +1,4 @@
-import { and, desc, eq, ne, or, sql } from 'drizzle-orm';
+import { and, desc, eq, isNull, ne, or, sql } from 'drizzle-orm';
 import type { Db } from '@telrad/db';
 import {
   appendAudit,
@@ -6,6 +6,7 @@ import {
   orders,
   patients,
   slaClocks,
+  slaTargets,
   studies,
   subSpecialties,
   tenantSites,
@@ -146,11 +147,34 @@ export function orphansRouter(db: Db): Router {
       qualityFlags: (study.qualityFlags ?? []).filter((f) => f !== 'site_unresolved' && f !== 'region_unresolved'),
     }).where(eq(studies.id, studyId));
 
-    const [sub] = await db.select({ minutes: subSpecialties.defaultSlaMinutes })
-      .from(subSpecialties).where(eq(subSpecialties.code, order.subSpecialtyCode ?? '____')).limit(1);
-    if (sub) {
-      const minutes = order.priority === 'stat' ? Math.max(Math.round(sub.minutes * 0.1), 30)
-        : order.priority === 'urgent' ? Math.max(Math.round(sub.minutes * 0.5), 60) : sub.minutes;
+    // The clock must come from the same source the worker uses: a tenant's own
+    // target for this modality and priority wins outright, otherwise the
+    // sub-specialty's routine window with the stat/urgent fractions. Keeping the
+    // two paths in lockstep is what stops a manually linked study being judged on
+    // a different contract than one that arrived linked.
+    let minutes: number | null = null;
+    const modality = study.modalityCode ?? order.modalityCode;
+    if (modality) {
+      const [target] = await db.select({ m: slaTargets.slaMinutes })
+        .from(slaTargets)
+        .where(and(
+          eq(slaTargets.tenantId, order.tenantId),
+          eq(slaTargets.modalityCode, modality),
+          eq(slaTargets.priority, order.priority),
+          isNull(slaTargets.effectiveTo),
+        ))
+        .limit(1);
+      if (target) minutes = target.m;
+    }
+    if (minutes === null) {
+      const [sub] = await db.select({ minutes: subSpecialties.defaultSlaMinutes })
+        .from(subSpecialties).where(eq(subSpecialties.code, order.subSpecialtyCode ?? '____')).limit(1);
+      if (sub) {
+        minutes = order.priority === 'stat' ? Math.max(Math.round(sub.minutes * 0.1), 30)
+          : order.priority === 'urgent' ? Math.max(Math.round(sub.minutes * 0.5), 60) : sub.minutes;
+      }
+    }
+    if (minutes !== null) {
       // Measured from when the center's pixels arrived, not from this click. A study
       // that sat in the orphan queue for three days does not get a fresh hour because
       // an operator finally named its order; the deadline being already past is the

@@ -250,6 +250,7 @@ const stalled = (over: Partial<StalledStudy> = {}): StalledStudy => ({
   tenantId: 1,
   linkState: 'linked',
   priority: 'urgent',
+  modalityCode: 'CT',
   subSpecialtyCode: 'ct-head',
   qualityFlags: ['study_not_complete'],
   receivedAt: new Date('2026-10-08T10:00:00Z'),
