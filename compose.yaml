@@ -249,6 +249,10 @@ services:
       # The GUI can read every backup and configure any destination, so an
       # unauthenticated LAN browser must not reach it. Never commit the value.
       DUPLICATI__WEBSERVICE_PASSWORD: ${TR_DUPLICATI_PASSWORD:-}
+      # Duplicati 2.4 refuses to start without it: the settings database (which
+      # holds the SFTP credential and job definitions) is encrypted at rest.
+      # Never commit the value.
+      SETTINGS_ENCRYPTION_KEY: ${TR_DUPLICATI_SETTINGS_KEY:-}
       TZ: UTC
     volumes:
       - ${TR_RUNTIME}/duplicati:/config
