@@ -1,6 +1,6 @@
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, gte, sql } from 'drizzle-orm';
 import type { Db } from '@telrad/db';
-import { studies, appendAudit } from '@telrad/db';
+import { studies, auditLog, appendAudit } from '@telrad/db';
 
 /**
  * Auto-escalation: a study that has sat too long at its current priority gets bumped up.
@@ -74,14 +74,38 @@ export async function autoEscalateOnce(port: AutoEscalatePort): Promise<AutoEsca
     let action = '';
 
     if (study.priority === 'stat' && ageMinutes >= THRESHOLDS.stat_to_emergency) {
-      // STAT that has waited 20+ minutes. We do not change the priority column (it is
-      // still stat), but we set an emergency flag that dispatch treats as "highest".
-      // This is a separate column to avoid losing the original priority.
-      await db.update(studies).set({
-        // emergency: true,  // Would need schema change; for now, log it
-      }).where(eq(studies.id, study.id));
-      action = 'stat_to_emergency';
-    } else if (study.priority === 'urgent' && ageMinutes >= THRESHOLDS.urgent_to_stat) {
+      // There is no emergency column: the desk signal is the audit row. An update
+      // with an empty set throws "No values to set" in drizzle, which killed the
+      // whole sweep on every tick, so the bump is recorded as audit only — and at
+      // most once an hour, per the note above on repeat bumps.
+      const already = await db.select({ id: auditLog.id }).from(auditLog)
+        .where(and(
+          eq(auditLog.action, 'studies.auto_escalated_stat_to_emergency'),
+          eq(auditLog.entity, 'studies'),
+          eq(auditLog.entityId, String(study.id)),
+          gte(auditLog.occurredAt, new Date(now.getTime() - 60 * 60_000)),
+        )).limit(1);
+      if (already.length === 0) {
+        await appendAudit(db, {
+          actorUserId: null,
+          actorKind: 'system',
+          tenantId: study.tenantId,
+          action: 'studies.auto_escalated_stat_to_emergency',
+          entity: 'studies',
+          entityId: String(study.id),
+          detail: {
+            accession: study.accession,
+            previousPriority: study.priority,
+            ageMinutes,
+            nodeId,
+          },
+        });
+        result.escalated += 1;
+        result.byAction.stat_to_emergency = (result.byAction.stat_to_emergency ?? 0) + 1;
+      }
+      continue;
+    }
+    if (study.priority === 'urgent' && ageMinutes >= THRESHOLDS.urgent_to_stat) {
       newPriority = 'stat';
       action = 'urgent_to_stat';
     } else if (study.priority === 'routine' && ageMinutes >= THRESHOLDS.routine_to_urgent) {

@@ -87,10 +87,15 @@ export function createApp(deps: AppDeps): Express {
     let workerState: 'fresh' | 'stale' | 'unknown' = 'unknown';
     if (checks.db) {
       try {
-        const rows = await db.execute<{ last_run_at: Date | null }>(
-          sql`select max(last_run_at) as last_run_at from telrad.ingest_cursors`);
-        const last = rows[0]?.last_run_at;
-        if (last) workerState = Date.now() - last.getTime() < 90_000 ? 'fresh' : 'stale';
+        // A timestamptz through this raw execute path arrives as a string, not a
+        // Date, so the heartbeat is read as epoch millis and compared numerically.
+        const rows = await db.execute<{ last_run_ms: number }>(
+          sql`select extract(epoch from max(last_run_at))::float8 * 1000 as last_run_ms
+              from telrad.ingest_cursors`);
+        const lastMs = rows[0]?.last_run_ms;
+        if (lastMs != null) {
+          workerState = Date.now() - Number(lastMs) < 90_000 ? 'fresh' : 'stale';
+        }
       } catch { workerState = 'unknown'; }
     }
     checks.worker = workerState !== 'stale';
