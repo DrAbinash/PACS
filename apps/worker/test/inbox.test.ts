@@ -42,6 +42,9 @@ const writer: OrthancWriter = {
     pushed.push({ bytes: bytes.length, labels });
     return { instanceId: `inst-${pushed.length}`, labelError: null };
   },
+  async removeStudy() {
+    return true;
+  },
 };
 
 const store: InboxStore = {
@@ -79,6 +82,9 @@ describe('drainOnce', () => {
     const refusing: OrthancWriter = {
       async pushInstance() {
         return { instanceId: 'inst-9', labelError: 'label telrad-batch-b-1 refused: 400' };
+      },
+      async removeStudy() {
+        return true;
       },
     };
 

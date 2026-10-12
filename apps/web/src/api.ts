@@ -143,6 +143,8 @@ export type ViewDescriptor = {
   }[];
   windowing: 'client';
   pixelFormat: 'int16-le';
+  // Set when the retention sweep has deleted the pixels; series is then empty.
+  purgedAt: string | null;
 };
 
 export type ViewInstance = {
@@ -579,6 +581,13 @@ export const api = {
     }),
   deactivateSlaTarget: (id: number) =>
     call<{ ok: boolean }>(`/v1/sla/targets/${id}`, { method: 'DELETE' }),
+  tenantRetention: () =>
+    call<{ ok: boolean; retention: RetentionRow[] }>('/v1/tenants/retention'),
+  setTenantRetention: (tenantId: number, retentionDays: number | null) =>
+    call<{ ok: boolean; tenantId: number; retentionDays: number | null }>(
+      `/v1/tenants/${tenantId}/retention`,
+      { method: 'PATCH', body: JSON.stringify({ retentionDays }) },
+    ),
 
   filmExports: () =>
     call<{ ok: boolean; exports: FilmExport[] }>('/v1/film/exports'),
@@ -613,6 +622,13 @@ export type SlaTarget = {
   slaMinutes: number;
   effectiveFrom: string;
   effectiveTo: string | null;
+};
+
+export type RetentionRow = {
+  tenantId: number;
+  code: string;
+  legalName: string;
+  retentionDays: number | null;
 };
 
 export type FilmExport = {

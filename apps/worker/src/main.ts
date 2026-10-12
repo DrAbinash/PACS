@@ -7,6 +7,7 @@ import { notifyOnce } from './notify.js';
 import { pollOnce, recheckStalled } from './ingest.js';
 import { drainOnce } from './inbox.js';
 import { createReleaseStore, releaseSweepOnce } from './release.js';
+import { createRetentionStore, retentionSweepOnce } from './retention.js';
 import { reviewSweepOnce } from './review.js';
 import { createOrthancReader, createOrthancWriter } from './orthanc.js';
 import { opsDigestOnce } from './ops.js';
@@ -42,6 +43,7 @@ const criticals = createCriticalStore(handle.db);
 const notifications = createNotifyStore(handle.db);
 const release = createReleaseStore(handle.db);
 const ops = createOpsStore(handle.db);
+const retention = createRetentionStore(handle.db, orthancWriter);
 // Both halves have to be present before anything leaves. A relay without a public origin would
 // send a message whose only actionable line — "read it here" — is a relative link, which is a
 // letter with no address on it rather than a bug in the mailer.
@@ -66,6 +68,12 @@ const whatsapp = createWhatsAppTransport({
 // empty address is a documented state — alerts stay audit-only and the boot line says so.
 const opsEmail = process.env.TR_OPS_EMAIL || null;
 const opsDigestMinutes = Math.max(Number(process.env.TR_OPS_DIGEST_MINUTES ?? 5), 1);
+// The retention sweep runs on its own clock, not the poll cadence: deleting a
+// study is heavy work on the node, and a ten-second poll turning into a
+// ten-second delete storm would starve ingest. A worker restart resets the
+// clock; the sweep is idempotent, so an early re-run only re-checks an empty set.
+const retentionSweepMinutes = Math.max(Number(process.env.TR_RETENTION_SWEEP_MINUTES ?? 1440), 1);
+let retentionRunAt = 0;
 
 async function notify(): Promise<void> {
   // Either channel alone is enough to run the sweep; the sweep gates each row on its own
@@ -147,6 +155,20 @@ async function releaseStale(): Promise<void> {
   }
 }
 
+// Pixels leave, records stay. The sweep is gated on its own interval; counts print
+// only when something happened, because a daily sweep that finds nothing due must
+// not look like an event in the log.
+async function retentionSweep(): Promise<void> {
+  const now = Date.now();
+  if (now < retentionRunAt) return;
+  retentionRunAt = now + retentionSweepMinutes * 60_000;
+  const p = await retentionSweepOnce(retention);
+  if (p.checked > 0 || p.failed > 0) {
+    console.log(`retention checked=${p.checked} purged=${p.purged} failed=${p.failed} `
+      + '(pixels deleted; reports, billing and audit untouched)');
+  }
+}
+
 async function sweep(): Promise<void> {
   const d = await dispatchSweep(dispatch);
   if (d.widened > 0) console.log(`dispatch widened=${d.widened} (offers to at-capacity readers under a live widen_pool stage)`);
@@ -221,6 +243,12 @@ async function tick(): Promise<void> {
   }
 
   try {
+    await retentionSweep();
+  } catch (err) {
+    console.error('retention sweep failed', err instanceof Error ? err.message : err);
+  }
+
+  try {
     // Its own label again: a clinic that was never told about a report is a different outage
     // from a case that was never routed, and the two queues do not share a failure mode.
     await notify();
@@ -251,6 +279,7 @@ async function tick(): Promise<void> {
 console.log(`telrad worker starting node=${nodeId} poll=${pollSeconds}s mode=${process.argv[2] ?? 'loop'} `
   + `mail=${smtp.configured ? `smtp via ${smtp.label}` : 'not configured (queued notifications will wait)'} `
   + `ops=${opsEmail ? `digest to ${opsEmail} every ${opsDigestMinutes}m` : 'not configured (alerts stay audit-only)'} `
+  + `retention=sweep every ${retentionSweepMinutes}m `
   + `wa=${whatsapp.configured ? whatsapp.label : 'not configured (whatsapp rows will wait)'}`);
 
 if (process.argv[2] === 'dispatch-once') {
@@ -288,6 +317,12 @@ if (process.argv[2] === 'dispatch-once') {
   // Only the release sweep. A verification run uses this to prove that a reader who went
   // offline has their cases returned without touching routing or dispatch.
   await releaseStale();
+  await handle.close();
+} else if (process.argv[2] === 'retention-once') {
+  // Only the retention sweep, ignoring the interval. A verification run uses this to
+  // prove pixels leave and records stay, without routing, dispatch or ingest beside it.
+  const p = await retentionSweepOnce(retention);
+  console.log(`retention checked=${p.checked} purged=${p.purged} failed=${p.failed}`);
   await handle.close();
 } else if (process.argv[2] === 'auto-escalate-once') {
   // Only the auto-escalation sweep. A verification run uses this to bump priorities

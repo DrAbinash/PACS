@@ -181,6 +181,11 @@ export type OrthancWriter = {
    * is reported, never thrown: the bytes are archived either way, and failing the
    * file would misrecord a successful ingest as a rejection. */
   pushInstance(bytes: Buffer, labels: string[]): Promise<PushResult>;
+  /** Deletes a study and its pixels. 200, 202 (node queued the delete) and 404
+   * (already gone — the sweep retries after a crash mid-purge) are all success;
+   * anything else throws, because a row marked purged while its pixels remain
+   * is the one lie this platform must not tell. */
+  removeStudy(nodePk: string): Promise<boolean>;
 };
 
 export function createOrthancWriter(opts: { baseUrl: string; user: string; password: string }): OrthancWriter {
@@ -210,6 +215,16 @@ export function createOrthancWriter(opts: { baseUrl: string; user: string; passw
         }
       }
       return { instanceId: created.ID, labelError: null };
+    },
+
+    async removeStudy(nodePk) {
+      const res = await fetch(`${opts.baseUrl}/studies/${encodeURIComponent(nodePk)}`, {
+        method: 'DELETE',
+        headers: { Authorization: auth },
+        signal: AbortSignal.timeout(120_000),
+      });
+      if (res.status === 200 || res.status === 202 || res.status === 404) return true;
+      throw new Error(`orthanc DELETE /studies ${res.status}: ${(await res.text()).slice(0, 200)}`);
     },
   };
 }

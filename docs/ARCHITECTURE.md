@@ -566,9 +566,17 @@ the only place a path appears.
 - Study-level provenance gating is in place (`IsStable` → `study_not_complete`,
   no clock, off the queue), but a study that never becomes stable has no timeout
   yet; it will sit in `studies` flagged forever.
-- Retention tiers are a column, not a job. Nothing moves bytes yet, and the
-  policy table is unread. That is P5 work, and the commercial reason it matters is
-  below.
+- Retention is now a job. Each tenant carries `retention_days` — edited from the
+  console settings card, audited as `retention.policy_set`, `null` keeps images
+  forever — and the worker's nightly sweep deletes the pixels of studies older
+  than their tenant's policy. It deletes at the node first and marks
+  `studies.purged_at` second: a crash mid-purge re-selects the row, the node's
+  404 counts as already done, and the row is marked once. The reverse order would
+  be the one lie this platform must not tell. Reports, billing and the audit
+  chain outlive the images; a pinned study (`studies.pinned_at`) is never swept;
+  the viewer answers a purged study with its purge date instead of forwarding the
+  request to a node that no longer has it. Still open: no screen shows the queue
+  of upcoming purges, and there is no export-before-delete.
 
 ## Commercial constraints that shape the schema
 

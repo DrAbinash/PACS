@@ -51,6 +51,7 @@ export function viewRouter(db: Db, orthanc: OrthancClient): Router {
       studyDate: studies.studyDate,
       receivedAt: studies.receivedAt,
       linkState: studies.linkState,
+      purgedAt: studies.purgedAt,
       patientName: patients.fullName,
       patientMrn: patients.mrn,
       patientGender: patients.gender,
@@ -190,11 +191,16 @@ export function viewRouter(db: Db, orthanc: OrthancClient): Router {
     if (!auth.row || auth.status !== 200) return denied(res, auth.status);
     const row = auth.row;
 
-    let tree: SeriesTree;
-    try {
-      tree = await treeFor(studyId, row.baseUrl, row.nodePk!);
-    } catch (err) {
-      return refuse(res, err, studyId);
+    // A swept study keeps its node_pk, so without this branch it would reach the node
+    // and come back as 'not_at_node' — indistinguishable from a lost study. Purged is
+    // a normal end state: the report, billing and audit outlive the pixels.
+    let tree: SeriesTree | null = null;
+    if (row.purgedAt === null) {
+      try {
+        tree = await treeFor(studyId, row.baseUrl, row.nodePk!);
+      } catch (err) {
+        return refuse(res, err, studyId);
+      }
     }
 
     await appendAudit(db, {
@@ -202,8 +208,9 @@ export function viewRouter(db: Db, orthanc: OrthancClient): Router {
       action: 'view.open', entity: 'studies', entityId: String(studyId),
       detail: {
         accession: row.accession,
-        series: tree.series.length,
-        instances: tree.series.reduce((n, s) => n + s.instances.length, 0),
+        series: tree?.series.length ?? 0,
+        instances: tree?.series.reduce((n, s) => n + s.instances.length, 0) ?? 0,
+        purged: tree === null,
         held: auth.hold?.state ?? (auth.access ? auth.access.as : 'operator'),
       },
     });
@@ -231,7 +238,7 @@ export function viewRouter(db: Db, orthanc: OrthancClient): Router {
       // to put a second name on somebody else's reading", and neither from "opening the
       // case I already signed".
       reportAccess: auth.access,
-      series: tree.series.map((s, index) => ({
+      series: (tree?.series ?? []).map((s, index) => ({
         index,
         pk: s.pk,
         uid: s.uid,
@@ -248,6 +255,8 @@ export function viewRouter(db: Db, orthanc: OrthancClient): Router {
       // browser, from the numbers.
       windowing: 'client',
       pixelFormat: 'int16-le',
+      // Set once the retention sweep has deleted the pixels; series is then empty.
+      purgedAt: row.purgedAt,
     });
   }));
 

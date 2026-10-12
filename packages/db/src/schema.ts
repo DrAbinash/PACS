@@ -51,9 +51,17 @@ export const tenants = telrad.table('tenants', {
   signatureLine: text('signature_line'),
   prepaidBalancePaise: integer('prepaid_balance_paise').notNull().default(0),
   filmExportTariffPaise: integer('film_export_tariff_paise').notNull().default(50000),
+  // Image retention in days from receipt. NULL keeps images forever. The sweep
+  // purges pixels only: reports, billing and audit are never touched. Edited
+  // from the console settings card, audited there.
+  retentionDays: integer('retention_days'),
   createdAt: at('created_at'),
 }, (t) => ({
   codeUq: uniqueIndex('tenants_code_uq').on(t.code),
+  retentionDaysPositive: check(
+    'tenants_retention_days_positive',
+    sql`${t.retentionDays} is null or ${t.retentionDays} >= 1`,
+  ),
 }));
 
 export const tenantSites = telrad.table('tenant_sites', {
@@ -336,6 +344,11 @@ export const studies = telrad.table('studies', {
   classification: jsonb('classification'),
   receivedAt: at('received_at'),
   linkedAt: timestamp('linked_at', { withTimezone: true, mode: 'date' }),
+  // A pinned study is exempt from the retention sweep (a dispute, a center's
+  // ask). purgedAt records when the sweep deleted the pixels; the report,
+  // billing and audit rows outlive the images.
+  pinnedAt: timestamp('pinned_at', { withTimezone: true, mode: 'date' }),
+  purgedAt: timestamp('purged_at', { withTimezone: true, mode: 'date' }),
   qualityFlags: jsonb('quality_flags').$type<string[]>().notNull().default(sql`'[]'::jsonb`),
 }, (t) => ({
   nodeUq: uniqueIndex('studies_node_uid_uq').on(t.storageNodeId, t.studyInstanceUid),

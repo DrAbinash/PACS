@@ -20,6 +20,7 @@ import { CriticalBoard } from './Critical';
 import { Billing } from './Billing';
 import { Performance } from './Performance';
 import { SlaTargets } from './SlaTargets';
+import { Retention } from './Retention';
 import { FilmExports } from './FilmExports';
 import { AuditBoard } from './AuditBoard';
 import { explainCode, retryLabel } from './Report';
@@ -914,6 +915,7 @@ export default function App() {
         {isOperator && <Performance show={isOperator} />}
 
         {isOperator && <SlaTargets show={isOperator} tenantId={session.user.tenantId} />}
+        {isOperator && <Retention show={isOperator} canEdit={session.user.role === 'owner'} />}
 
         {isOperator && <FilmExports show={isOperator} canOpen={isOperator} onOpen={setOpenStudy} />}
 

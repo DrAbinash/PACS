@@ -36,6 +36,13 @@
       "when": 1791787377000,
       "tag": "0004_feature_wave",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1791836045049,
+      "tag": "0005_vengeful_skaar",
+      "breakpoints": true
     }
   ]
 }

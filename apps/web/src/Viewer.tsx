@@ -45,6 +45,10 @@ export default function Viewer({ studyId, onBack, onChanged }: {
       .then((d) => {
         if (!live) return;
         setDescriptor(d);
+        if (d.purgedAt) {
+          setError(`The images were deleted by the retention policy on ${new Date(d.purgedAt).toLocaleDateString()}. The report and the audit trail remain.`);
+          return;
+        }
         const first = d.series.find((s) => s.count > 0);
         if (!first) setError('The node reports no instances for this study.');
         setSeriesIndex(first ? first.index : 0);
