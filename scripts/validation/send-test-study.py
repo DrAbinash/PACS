@@ -81,6 +81,14 @@ def rest_post(path, body):
         return json.loads(res.read().decode())
 
 
+def rest_text(path):
+    # Metadata values answer as raw strings, not JSON documents.
+    token = base64.b64encode(Creds.encode()).decode()
+    req = urllib.request.Request(REST_URL + path, headers={"Authorization": "Basic " + token})
+    with urllib.request.urlopen(req, timeout=15) as res:
+        return res.read().decode().strip()
+
+
 def main():
     ds, meta = build_instance()
     ae = AE(ae_title="TELRAD_TEST")
@@ -119,7 +127,7 @@ def main():
     # plain-value dict the checks below read.
     meta_back = rest(f"/instances/{instance_id}/tags?short")
     tags = meta_back
-    remote_aet = rest(f"/instances/{instance_id}/metadata/RemoteAET")
+    remote_aet = rest_text(f"/instances/{instance_id}/metadata/RemoteAET")
 
     # Print exactly the facts apps/worker depends on, so a future Orthanc version
     # that changes any of them is visible in one line of output. RemoteAET is the
