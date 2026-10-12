@@ -600,16 +600,22 @@ The deployment is a LAN service by default: the console answers on
 because Caddy answers SNI-less handshakes with the named certificate — the browser
 warns and one click-through admits the visitor, the same as for the name.
 
-To put a public name on it without opening a port on the router, run a cloudflared
-tunnel as a container: one outbound connection, public TLS terminates at Cloudflare,
-and the origin face is an unpublished plain-HTTP Caddy listener (`http://tr-caddy:8080`)
-that nothing off the docker network can reach.
+A public name rides a cloudflared tunnel: one outbound connection, public TLS
+terminates at Cloudflare, and the origin face is Caddy's port 8080, published to
+host loopback only — plain HTTP never leaves the machine.
 
-1. Cloudflare Zero Trust dashboard → Networks → Tunnels → Create a tunnel
-   (cloudflared), name it, copy the token.
-2. Public hostname: `pacs.example.com` → service type `HTTP`, URL `tr-caddy:8080`.
-3. Add the token to `.env` as `TR_TUNNEL_TOKEN` (never commit it), then:
-   `docker compose --profile nas --profile tunnel up -d tunnel`
+If a dashboard-managed connector already runs on this host (network mode host),
+there is no new tunnel and no token:
+
+1. Zero Trust dashboard → Networks → Tunnels → the existing tunnel →
+   Public hostname → add `pacs.example.com`, service type `HTTP`,
+   URL `localhost:$TR_TUNNEL_PORT`.
+2. `docker compose --profile nas up -d caddy` publishes `127.0.0.1:$TR_TUNNEL_PORT`.
+
+Otherwise create a dedicated tunnel: Networks → Tunnels → Create (cloudflared);
+public hostname as above but service `HTTP tr-caddy:8080` (the docker-network
+name); put its token in `.env` as `TR_TUNNEL_TOKEN` (never commit it) and start
+the in-stack connector: `docker compose --profile nas --profile tunnel up -d tunnel`.
 
 The console login is then the only gate on the public name; a Cloudflare Access
 policy in front of it is the next layer if that ever feels thin. When the public
