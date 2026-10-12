@@ -127,6 +127,8 @@ def main():
     # plain-value dict the checks below read.
     meta_back = rest(f"/instances/{instance_id}/tags?short")
     tags = meta_back
+    # /tags?short on this image omits StudyInstanceUID; the keyword form carries it.
+    simplified = rest(f"/instances/{instance_id}/simplified-tags")
     remote_aet = rest_text(f"/instances/{instance_id}/metadata/RemoteAET")
 
     # Print exactly the facts apps/worker depends on, so a future Orthanc version
@@ -139,7 +141,7 @@ def main():
     print(f"ok   instance id={instance_id}")
     print(f"ok   tags PatientName={tags.get('0010,0010')!r} Modality={tags.get('0008,0060')!r} "
           f"Accession={tags.get('0008,0050')!r}")
-    print(f"ok   study uid tag present={'yes' if tags.get('0020,000D') else 'no'}")
+    print(f"ok   study uid tag present={'yes' if simplified.get('StudyInstanceUID') else 'no'}")
     print(f"ok   accession_number_matches_input={tags.get('0008,0050') == ds.AccessionNumber}")
     print(f"ok   remote_aet={remote_aet!r} matches_site_registration={remote_aet == 'TELRAD_TEST'}")
     return 0
