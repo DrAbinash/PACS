@@ -44,6 +44,13 @@ were never told. When you do fill them, fill all three together — `TR_SMTP_URL
 `TR_PUBLIC_URL` produces a notice whose only actionable line is a link nobody can follow, and the
 sweep refuses it rather than sending it.
 
+`TR_TLS_HOSTNAME` is the one non-secret you must still choose deliberately: it is the name
+centers type into their browser, and Caddy issues its internal certificate for exactly that
+name — nothing else will complete a handshake. Set it to the DNS name that resolves to this
+host and set `TR_PUBLIC_URL` to `https://$TR_TLS_HOSTNAME:$TR_HTTPS_PORT`; the doctor checks
+the pair agrees. A bare IP cannot work (an IP URL sends no SNI, so Caddy has no name to
+certify), and `localhost` is correct only for a single-machine trial.
+
 ```bash
 bash scripts/doctor/check-secrets.sh   # must pass before the first boot
 bash scripts/doctor/check-config.sh
@@ -81,11 +88,20 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8042/ping   # expect 0
 
 The image refuses to start with authentication enabled and no credential, so the
 password arrives as `ORTHANC_PASSWORD` (compose maps it from `TR_ORTHANC_PASSWORD`)
-and the username is `orthanc`:
+and the username is `orthanc`. This image ships neither `curl` nor `wget`, so the
+probe is the `python3` that is in it (the same fact the orthanc healthcheck
+encodes):
 
 ```bash
-docker compose exec orthanc curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8042/studies            # expect 401
-docker compose exec orthanc curl -s -u "orthanc:$(printf %s "$TR_ORTHANC_PASSWORD")" -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8042/studies   # expect 200
+docker compose exec orthanc python3 -c "
+import urllib.request,urllib.error
+try: print(urllib.request.urlopen('http://127.0.0.1:8042/studies',timeout=5).status)
+except urllib.error.HTTPError as e: print(e.code)"                                     # expect 401
+docker compose exec orthanc python3 -c "
+import os,base64,urllib.request,urllib.error
+h={'Authorization':'Basic '+base64.b64encode(('orthanc:'+os.environ['ORTHANC_PASSWORD']).encode()).decode()}
+try: print(urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8042/studies',headers=h),timeout=5).status)
+except urllib.error.HTTPError as e: print(e.code)"                                     # expect 200
 ```
 
 A `200` on the first line means the anonymous image plane is still running, and
@@ -94,10 +110,25 @@ nothing external may connect until it is not.
 ## 5. Migrate and bootstrap
 
 ```bash
-pnpm --filter @telrad/db db:migrate     # migrations/ is committed; CI regenerates and diffs it
-docker compose --profile nas up -d api worker caddy
-curl -sk https://127.0.0.1:8443/health/ready
+docker compose --profile nas run --rm api node apps/api/dist/cli.js migrate
+docker compose --profile nas up -d api caddy
+curl -sk https://localhost:8443/health/ready
 ```
+
+The migration runs inside a one-off api container and nowhere else. The database
+publishes no port by design, so a host-side `pnpm --filter @telrad/db db:migrate`
+cannot connect from the NAS, and a Container Manager host has no node or pnpm
+to try it with — while the api image already carries `packages/db/migrations`
+(the Dockerfile copies `packages/`). The one-off runs first because the api
+server refuses to boot against an unmigrated schema, and its crash loop would
+hold caddy's `depends_on` down with it; the migrate must finish before `up`.
+The worker is deliberately not started yet either: its first polls would error
+against a half-migrated database.
+
+The curl address is `https://localhost:8443` because TR_TLS_HOSTNAME defaults to
+`localhost` and Caddy issues its internal certificate for exactly that name —
+a bare IP cannot complete the handshake (an IP URL sends no SNI). Set
+`TR_TLS_HOSTNAME` to the real name and browse that instead.
 
 `/health/ready` must return `{"ok":true,"components":{"db":true,"orthanc":true}}`.
 Then create the first operator, tenant and storage node:
@@ -111,7 +142,12 @@ docker compose exec api node apps/api/dist/cli.js bootstrap \
 
 Bootstrap refuses a password under 14 characters and refuses to overwrite an
 existing address. It writes the first row of the audit chain, so
-`pnpm verify-audit` should report one row and `broken=0`.
+`docker compose exec api node apps/api/dist/cli.js verify-audit` should report one
+row and `broken=0`.
+
+```bash
+docker compose --profile nas up -d worker
+```
 
 **Then provision the readers, because nothing routes without them.** Coverage is a
 claim, not a default: an account with no `--subs`/`--mods` list exists and is never
@@ -188,11 +224,11 @@ docker run --rm -v "$PWD/scripts/validation:/v" -e OUT_DIR=/v/out \
   -e ACCESSION=ACC-TEST-0001 -e PATIENT_ID=P-TEST-0001 -e PATIENT_NAME="Ramesh^Kumar" \
   python:3.11-slim sh -c "pip -q install pydicom && python /v/make-study-files.py"
 
-python scripts/validation/run-p1-flow.py --api http://127.0.0.1:3001 \
+python scripts/validation/run-p1-flow.py --api https://localhost:8443 --insecure \
   --email <bootstrap email> --password '<bootstrap passphrase>' \
   --dir scripts/validation/out --files img001.dcm,img002.dcm,img003.dcm \
   --accession ACC-TEST-0001
-pnpm --filter @telrad/worker once      # TR_INBOX_ROOT must be the same directory the api writes into
+docker compose --profile nas run --rm worker once      # TR_INBOX_ROOT must be the same directory the api writes into
 ```
 
 `run-p1-flow.py` exits non-zero on any unexpected status, and it drives every upload
@@ -297,12 +333,28 @@ origin as the api — which is not a style choice. The session cookie is `HttpOn
 token where any browser extension can read it.
 
 ```bash
-pnpm --filter @telrad/web build          # writes apps/web/dist
-docker compose --profile nas up -d caddy # serves it at https://<nas>:8443
+pnpm --filter @telrad/web build          # on the workstation: writes apps/web/dist
+```
+
+A Container Manager host has no node or pnpm, so on the NAS itself either copy
+`apps/web/dist` from the machine that built it, or build it in a throwaway
+container — same result, nothing left behind:
+
+```bash
+docker run --rm -v "$PWD:/repo" -w /repo node:22-alpine sh -c \
+  "corepack enable && pnpm install --frozen-lockfile=false && pnpm --filter @telrad/web build"
+docker compose --profile nas up -d caddy # serves it at https://$TR_TLS_HOSTNAME:8443
 ```
 
 Build it before starting Caddy. An empty `apps/web/dist` mounts fine and answers 404
 for every page, which looks like a broken deployment rather than a missing build step.
+
+Browse `https://$TR_TLS_HOSTNAME:8443`, never the NAS's IP — the internal
+certificate is issued for that name alone, so an IP URL is refused at the
+handshake. The name must resolve to the NAS (a DNS record or the workstation's
+hosts file), and the first visit shows a certificate warning because the CA is
+Caddy's own; on a managed workstation, import `TR_RUNTIME/caddy/data/pki`
+root certificate once instead of clicking through on every reader's machine.
 
 For working on it locally, `pnpm --filter @telrad/web dev` serves the page and proxies
 `/v1` to the api on `127.0.0.1:3101`, so the cookie stays first-party there too.

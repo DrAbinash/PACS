@@ -1,6 +1,10 @@
 {
 	admin off
-	auto_https off
+	# disable_redirects, not off: plain `off` disables certificate management
+	# entirely, and then `tls internal` provisions nothing — every handshake
+	# dies with a TLS alert while the logs stay silent about why (measured).
+	# Redirects stay disabled so Caddy never binds port 80.
+	auto_https disable_redirects
 	servers {
 		trusted_proxies static private_ranges
 	}
@@ -9,7 +13,12 @@
 # The NAS target cannot bind 443 because DSM and Web Station own it, so this
 # deployment serves on 8443 with Caddy's internal CA. The cloud target binds 443
 # and replaces `tls internal` with a real DNS challenge.
-:8443 {
+#
+# The site address carries a hostname, not just a port: a bare `:8443` gives
+# Caddy no name to certify, and a plain IP cannot work either, because an IP
+# URL sends no SNI. TR_TLS_HOSTNAME is the name centers type into their
+# browser; it must resolve to this host and match TR_PUBLIC_URL.
+{$TR_TLS_HOSTNAME:localhost}:8443 {
 	tls internal
 
 	# Caddy is the only path to Orthanc's REST and DICOMweb surface. The viewer

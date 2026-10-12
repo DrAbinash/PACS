@@ -102,6 +102,13 @@ services:
       TR_UPLOAD_SIGNING_SECRET: ${TR_UPLOAD_SIGNING_SECRET}
       TR_PUBLIC_URL: ${TR_PUBLIC_URL}
       TR_LOG_LEVEL: ${TR_LOG_LEVEL:-info}
+      # Loopback (the code default) is unreachable from another container, so the
+      # api would pass its own healthcheck while Caddy gets connection refused.
+      TR_BIND_HOST: 0.0.0.0
+      # The image carries packages/db/migrations via `COPY packages`, which is what
+      # makes `cli.js migrate` runnable here — the database publishes no port by
+      # design and a Container Manager host has no node of its own.
+      TR_MIGRATIONS_DIR: /app/packages/db/migrations
       TZ: UTC
     volumes:
       # The api writes staged uploads here and the worker drains them into the
@@ -127,7 +134,10 @@ services:
     container_name: tr-worker
     <<: *runtime
     profiles: ["nas", "cloud"]
-    command: ["run"]
+    # Full CMD, not just the mode: a partial override replaces the image CMD
+    # entirely, and the node base image's entrypoint turns a bare `run` into
+    # `node run` — a crash loop that looks like a missing module.
+    command: ["node", "apps/worker/dist/main.js", "run"]
     volumes:
       - ${TR_RUNTIME}/inbox:/app/inbox
     environment:
@@ -174,6 +184,14 @@ services:
       - ./apps/web/dist:/srv:ro
       - ${TR_RUNTIME}/caddy/data:/data
       - ${TR_RUNTIME}/caddy/config:/config
+    environment:
+      # The Caddyfile injects this as the Authorization header on /dicom-web/* proxy
+      # calls, so the image plane never sees an anonymous request. It must equal
+      # base64("orthanc:" + TR_ORTHANC_PASSWORD) — check-secrets.sh verifies the pair.
+      TR_ORTHANC_BASIC_B64: ${TR_ORTHANC_BASIC_B64}
+      # The site name Caddy issues its internal certificate for. A hostless site
+      # address refuses every TLS handshake (measured), and an IP URL sends no SNI.
+      TR_TLS_HOSTNAME: ${TR_TLS_HOSTNAME:-localhost}
     ports:
       # DSM owns 80/443, so the NAS target serves on 8443. The cloud target takes
       # 443 and Caddy does the certificate work instead of the Synology wizard.

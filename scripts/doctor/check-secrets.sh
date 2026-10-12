@@ -12,12 +12,32 @@ fail=0
 # absent file is a skip with a instruction, not a failure that trains the operator to
 # ignore this script. Nothing boots on a missing secret anyway: loadEnv throws.
 if [[ -f .env ]]; then
-  if grep -Eq '<generated|changeme|^\s*[A-Z_]+=\s*$' .env; then
+  # TR_SMTP_URL/TR_SMTP_FROM are the documented optional pair: empty means "no relay
+  # configured", the worker says so at boot and notices stay queued. Every other
+  # empty value is a placeholder the stack would inherit, so those still refuse.
+  bad=$(grep -En '<generated|changeme|^\s*[A-Z_]+=\s*$' .env | grep -Ev '^[0-9]+:(TR_SMTP_URL|TR_SMTP_FROM)=$' || true)
+  if [[ -n "$bad" ]]; then
     echo "FAIL .env still contains a placeholder or an empty value"
-    grep -En '<generated|changeme|^\s*[A-Z_]+=\s*$' .env | sed 's/^/  /'
+    printf '%s\n' "$bad" | sed 's/^/  /'
     fail=1
   else
     echo "ok   .env has no placeholder values"
+  fi
+
+  # The one secret that must equal another: Caddy forwards TR_ORTHANC_BASIC_B64
+  # verbatim as the Basic header on /dicom-web/*, so a stale copy authenticates
+  # against nothing while every healthcheck stays green. Regenerate the pair
+  # together; this check catches the copy that was not.
+  pw=$(sed -n 's/^TR_ORTHANC_PASSWORD=//p' .env | tr -d '"' | tr -d "'")
+  b64=$(sed -n 's/^TR_ORTHANC_BASIC_B64=//p' .env | tr -d '"' | tr -d "'")
+  expected=$(printf 'orthanc:%s' "$pw" | base64 | tr -d '\n')
+  if [[ -z "$b64" ]]; then
+    echo "WARN .env has no TR_ORTHANC_BASIC_B64; dicom-web proxying will answer 401"
+  elif [[ "$b64" != "$expected" ]]; then
+    echo "FAIL TR_ORTHANC_BASIC_B64 does not decode to orthanc:TR_ORTHANC_PASSWORD"
+    fail=1
+  else
+    echo "ok   TR_ORTHANC_BASIC_B64 matches the Orthanc credential"
   fi
 else
   echo "skip no .env in this checkout; run this again after writing it"

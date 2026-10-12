@@ -5,6 +5,7 @@ import {
   escalationRules,
   modalities,
   openDb,
+  runMigrations,
   storageNodes,
   subSpecialties,
   tenants,
@@ -291,13 +292,15 @@ async function addReader(args: Args) {
 }
 
 const command = process.argv[2];
-if (command === 'bootstrap') {
+if (command === 'migrate') {
+  await runMigrations(dbUrl());
+} else if (command === 'bootstrap') {
   await bootstrap(parse(process.argv.slice(3)));
 } else if (command === 'add-reader') {
   await addReader(parse(process.argv.slice(3)));
 } else if (command === 'verify-audit') {
   await verifyAudit();
 } else {
-  console.error('usage: telrad-api <bootstrap|add-reader|verify-audit> [--flags]');
+  console.error('usage: telrad-api <migrate|bootstrap|add-reader|verify-audit> [--flags]');
   process.exitCode = 2;
 }

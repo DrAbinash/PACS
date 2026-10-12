@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 
 export type Env = {
   port: number;
+  bindHost: string;
   dbUrl: string;
   orthanc: { baseUrl: string; user: string; password: string };
   sessionSecret: string;
@@ -37,6 +38,11 @@ function strong(name: string, minLength = 24): string {
 export function loadEnv(): Env {
   return {
     port: Number(process.env.PORT ?? 3001),
+    // Loopback is the safe default for a bare-host dev run; a container must
+    // bind every interface or the proxy beside it gets connection refused
+    // while the in-container healthcheck stays green — the one failure mode a
+    // healthcheck cannot catch.
+    bindHost: process.env.TR_BIND_HOST ?? '127.0.0.1',
     dbUrl: required('TR_DB_URL'),
     orthanc: {
       baseUrl: required('TR_ORTHANC_URL'),

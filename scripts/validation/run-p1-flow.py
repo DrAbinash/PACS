@@ -14,16 +14,28 @@ import hashlib
 import http.cookiejar
 import json
 import os
+import ssl
 import sys
 import urllib.request
 from pathlib import Path
 
 
 class Api:
-    def __init__(self, base: str):
+    def __init__(self, base: str, insecure: bool = False):
         self.base = base.rstrip("/")
         self.jar = http.cookiejar.CookieJar()
-        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.jar))
+        # Deployments serve through Caddy's internal CA, whose root no client
+        # machine trusts; --insecure is how a validation script talks to one.
+        # It stays opt-in so a public origin keeps real verification.
+        ctx = None
+        if insecure and self.base.startswith("https:"):
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        self.opener = urllib.request.build_opener(
+            urllib.request.HTTPSHandler(context=ctx),
+            urllib.request.HTTPCookieProcessor(self.jar),
+        )
         self.bearer = None
 
     def call(self, method, path, body=None, headers=None, raw=None):
@@ -58,9 +70,11 @@ def main() -> int:
     ap.add_argument("--files", required=True)
     ap.add_argument("--accession", default="ACC-UPLOAD-0001")
     ap.add_argument("--tenant-id", type=int, default=1)
+    ap.add_argument("--insecure", action="store_true",
+                    help="accept the deployment's internal CA (Caddy tls internal)")
     args = ap.parse_args()
 
-    api = Api(args.api)
+    api = Api(args.api, insecure=args.insecure)
     failed = []
 
     def step(name, expect, status, payload):
@@ -108,7 +122,7 @@ def main() -> int:
     # A separate client with no cookie jar. An agent on a modality PC has a token and
     # no session, and reusing this client for the upload steps is how a router that
     # demands a session answered 201 here while the real agent got 401.
-    agent = Api(args.api)
+    agent = Api(args.api, insecure=args.insecure)
     agent.bearer = token
     status, body = agent.call("POST", "/v1/uploads/batches", {
         "filesExpected": len(args.files.split(",")), "accessionHint": args.accession,

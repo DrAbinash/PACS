@@ -7,6 +7,7 @@ export { schema };
 export * from './schema.js';
 export * from './dispatch-reads.js';
 export * from './audit.js';
+export { runMigrations } from './migrate-runner.js';
 
 export const SCHEMA = 'telrad';
 

@@ -17,7 +17,7 @@ await assertMigrated(handle.db);
 const orthanc = createOrthancClient(env.orthanc);
 const app = createApp({ db: handle.db, version, inboxRoot: env.inboxRoot, secureCookies: env.publicUrl.startsWith('https'), orthanc });
 
-const server = app.listen(env.port, '127.0.0.1', () => {
+const server = app.listen(env.port, env.bindHost, () => {
   console.log(`telrad api starting version=${version} port=${env.port}`);
 });
 
