@@ -651,7 +651,9 @@ export const filmExports = telrad.table('film_exports', {
   patientName: text('patient_name'),
   studyDescription: text('study_description'),
   exportedAt: at('exported_at'),
-});
+}, (t) => ({
+  tenantIdx: index('film_exports_tenant_idx').on(t.tenantId, t.exportedAt),
+}));
 
 export const settings = telrad.table('settings', {
   key: text('key').primaryKey(),
