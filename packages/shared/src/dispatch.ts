@@ -47,6 +47,10 @@ export type ReaderCandidate = {
   lastSeenAt: Date | null;
   lastAssignedAt: Date | null;
   onShift: boolean;
+  // Fraction of recent offers that came back declined (0 to 1). A reader who keeps
+  // saying no is routed below one who keeps saying yes, so the queue does not pile up
+  // behind a name that is not taking work. Zero when there is no recent history.
+  declineRate: number;
 };
 
 export type RejectReason =
@@ -175,10 +179,14 @@ export function pickReader(
   // Fewest open cases first so one person does not absorb the queue; then whoever is
   // rostered, so night work does not drift to the people who volunteered; then whoever
   // has gone longest without a case, which is what makes rotation visible rather than
-  // accidental.
+  // accidental. Decline rate last: a reader who has been saying no is pushed below one
+  // who has been saying yes, but only after the load-balancing ties are broken — a
+  // reader with two open cases and a 50% decline rate still beats one with five open
+  // and a 0% rate, because the queue is the clinical risk, not the pattern.
   const ranked = [...eligible].sort((a, b) => a.openCases - b.openCases
     || Number(b.onShift) - Number(a.onShift)
     || (a.lastAssignedAt?.getTime() ?? 0) - (b.lastAssignedAt?.getTime() ?? 0)
+    || a.declineRate - b.declineRate
     || a.name.localeCompare(b.name));
 
   const chosen = ranked[0]!;

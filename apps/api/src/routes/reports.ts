@@ -710,6 +710,80 @@ export function reportsRouter(db: Db): Router {
     });
   }));
 
+  // Full-text search across signed reports. The sections column is JSONB — a dictionary
+  // pasted into a structured form — and the search has to reach into every value without
+  // knowing the key names in advance. `jsonb_each_text` flattens the object into rows the
+  // text-search vector can be built from, and a GIN index on the expression would make
+  // this fast at scale; for now the query runs against the signed set, which is the set
+  // a clinician searches, and it is small enough that a sequential scan answers in time.
+  r.get('/reports/search', ah(async (req: Ctx, res) => {
+    const p = req.principal!;
+    const q = String(req.query.q ?? '').trim();
+    if (q.length < 2) {
+      return res.status(422).json({ ok: false, error: 'query must be at least 2 characters' });
+    }
+    if (q.length > 200) {
+      return res.status(422).json({ ok: false, error: 'query too long' });
+    }
+    const scope = scopeTenant(p);
+    const limit = Math.min(Number(req.query.limit ?? 50) || 50, 200);
+
+    // The search term is interpolated as a bind parameter, never into the SQL text.
+    // `plainto_tsquery` tokenises the input and ignores operators, which is what a
+    // clinician typing "left lung nodule" expects — three words, any order, all present.
+    const rows = await db.select({
+      id: reports.id,
+      studyId: reports.studyId,
+      version: reports.version,
+      state: reports.state,
+      authorName: reports.authorName,
+      signedAt: reports.signedAt,
+      accession: studies.accessionNumber,
+      modality: studies.modalityCode,
+      patientName: patients.fullName,
+      patientMrn: patients.mrn,
+      tenantCode: tenants.code,
+      centreName: tenants.legalName,
+    }).from(reports)
+      .innerJoin(studies, eq(studies.id, reports.studyId))
+      .leftJoin(patients, eq(patients.id, studies.patientId))
+      .leftJoin(tenants, eq(tenants.id, reports.tenantId))
+      .where(and(
+        inArray(reports.state, ['signed', 'verified', 'delivered', 'amended']),
+        scope === null ? undefined : eq(reports.tenantId, scope),
+        sql`exists (
+          select 1 from jsonb_each_text(${reports.sections}) kv
+          where to_tsvector('english', kv.value) @@ plainto_tsquery('english', ${q})
+        )`,
+      ))
+      .orderBy(desc(reports.signedAt))
+      .limit(limit);
+
+    // The reader who searches must be able to read what comes back. A cross-tenant
+    // search is refused at the scope filter above; within the tenant, a draft is not
+    // returned because the state filter already excludes it, and a signed report is
+    // shown only to readers the `mayReadReport` rule permits — which, for signed
+    // reports, is every radiologist in the tenant.
+    res.json({
+      ok: true,
+      query: q,
+      results: rows.map((row) => ({
+        id: row.id,
+        studyId: row.studyId,
+        version: row.version,
+        state: row.state,
+        authorName: row.authorName,
+        signedAt: row.signedAt,
+        accession: row.accession,
+        modality: row.modality,
+        patientName: row.patientName,
+        patientMrn: row.patientMrn,
+        tenantCode: row.tenantCode,
+        centreName: row.centreName,
+      })),
+    });
+  }));
+
   r.get('/reports/:id', ah(async (req: Ctx, res) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ ok: false, error: 'bad_id' });

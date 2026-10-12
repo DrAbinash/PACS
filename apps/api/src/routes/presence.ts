@@ -5,6 +5,7 @@ import {
   assignments,
   clinicianProfiles,
   readerAvailability,
+  reports,
   rosters,
   users,
 } from '@telrad/db';
@@ -27,6 +28,23 @@ export function presenceRouter(db: Db): Router {
     }).from(assignments)
       .where(inArray(assignments.state, ['offered', 'accepted', 'reading']))
       .groupBy(assignments.clinicianUserId);
+    return new Map(rows.map((row) => [row.userId, row.n]));
+  }
+
+  // The sidebar the desk reads at 2 a.m. needs one more number than "how many open
+  // cases": how many has this reader signed today. A reader with three open and twelve
+  // signed is working flat out; one with three open and zero signed since 22:00 is the
+  // person you call. The count is per calendar day in UTC, which is the same clock the
+  // report signature line prints.
+  async function signedTodayCounts(): Promise<Map<number, number>> {
+    const todayStart = new Date();
+    todayStart.setUTCHours(0, 0, 0, 0);
+    const rows = await db.select({
+      userId: reports.authorUserId,
+      n: sql<number>`count(*)::int`,
+    }).from(reports)
+      .where(sql`${reports.signedAt} >= ${todayStart.toISOString()}::timestamptz`)
+      .groupBy(reports.authorUserId);
     return new Map(rows.map((row) => [row.userId, row.n]));
   }
 
@@ -157,6 +175,7 @@ export function presenceRouter(db: Db): Router {
       .orderBy(users.displayName).limit(limit);
 
     const open = await openCaseCounts();
+    const signed = await signedTodayCounts();
     const shift = await onShiftWindow(tenantId, now);
 
     const panel = rows.map((row) => {
@@ -179,6 +198,7 @@ export function presenceRouter(db: Db): Router {
         modalityCodes: row.modalityCodes ?? [],
         tenantId: row.tenantId,
         openCases,
+        signedToday: signed.get(row.userId) ?? 0,
         maxQueueSize: row.maxQueueSize ?? 5,
         declaredState: row.state ?? 'offline',
         declaredSince: row.stateSince,

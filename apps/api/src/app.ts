@@ -16,8 +16,10 @@ import { COOKIE, readCookie, requireAuth, scopeTenant, type Ctx } from './auth.j
 import { billingRouter } from './routes/billing.js';
 import { clinicalRouter } from './routes/clinical.js';
 import { criticalsRouter } from './routes/criticals.js';
+import { filmRouter } from './routes/film.js';
 import { orphansRouter } from './routes/orphans.js';
 import { presenceRouter } from './routes/presence.js';
+import { qcRouter } from './routes/qc.js';
 import { reportsRouter } from './routes/reports.js';
 import { sitesRouter } from './routes/sites.js';
 import { uploadsRouter } from './routes/uploads.js';
@@ -246,6 +248,8 @@ export function createApp(deps: AppDeps): Express {
   app.use('/v1', reportsRouter(db));
   app.use('/v1', criticalsRouter(db));
   app.use('/v1', billingRouter(db));
+  app.use('/v1', qcRouter(db));
+  app.use('/v1', filmRouter(db));
 
   // An unknown `/v1/...` path answers with JSON, not Express's HTML 404. Every other
   // failure mode in this API speaks JSON, and a client should not have to special-case one.

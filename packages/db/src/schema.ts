@@ -50,6 +50,7 @@ export const tenants = telrad.table('tenants', {
   contactPhone: text('contact_phone'),
   signatureLine: text('signature_line'),
   prepaidBalancePaise: integer('prepaid_balance_paise').notNull().default(0),
+  filmExportTariffPaise: integer('film_export_tariff_paise').notNull().default(50000),
   createdAt: at('created_at'),
 }, (t) => ({
   codeUq: uniqueIndex('tenants_code_uq').on(t.code),
@@ -610,6 +611,25 @@ export const payoutLines = telrad.table('payout_lines', {
   reportId: integer('report_id').notNull().references(() => reports.id),
   amountPaise: integer('amount_paise').notNull(),
   isNight: boolean('is_night').notNull().default(false),
+});
+
+// Film exports are billed as a digital product: a CD, DVD, USB, or printed film set that
+// leaves the platform. The tariff is per export, not per study — a center that burns three
+// copies of the same study pays three times, because each disc is a physical product.
+export const filmExports = telrad.table('film_exports', {
+  id: serialId('id'),
+  tenantId: tenantId,
+  studyId: integer('study_id').notNull().references(() => studies.id),
+  invoiceLineId: integer('invoice_line_id').references(() => invoiceLines.id),
+  medium: text('medium', { enum: ['cd', 'dvd', 'usb', 'film_print', 'cloud_link'] }).notNull(),
+  quantity: smallint('quantity').notNull().default(1),
+  unitPaise: integer('unit_paise').notNull(),
+  totalPaise: integer('total_paise').notNull(),
+  requestedByUserId: integer('requested_by_user_id').references(() => users.id),
+  requestedByName: text('requested_by_name').notNull(),
+  patientName: text('patient_name'),
+  studyDescription: text('study_description'),
+  exportedAt: at('exported_at'),
 });
 
 export const settings = telrad.table('settings', {

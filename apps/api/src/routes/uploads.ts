@@ -8,7 +8,7 @@ import {
   uploadBatches,
   uploadFiles,
 } from '@telrad/db';
-import { cleanText, LIMITS, safeFilename, sniffKind } from '@telrad/shared';
+import { cleanText, LIMITS, safeFilename, sniffKind, buildSecondaryCapture } from '@telrad/shared';
 import { Router } from 'express';
 import { requireUploader, type Ctx } from '../auth.js';
 import { ah } from '../handler.js';
@@ -33,6 +33,121 @@ function uploader(req: Ctx): UploadCtx | null {
 export function uploadsRouter(db: Db, inboxRoot: string): Router {
   const r = Router();
   r.use(requireUploader(db));
+
+  // JPG-to-DICOM: accepts a raw JPEG, wraps it in a DICOM Secondary Capture, and feeds it
+  // into the same inbox the agent uses. The metadata comes from query parameters so the
+  // request body stays a pure image stream — no multipart parsing, no temporary files.
+  r.post('/jpg', ah(async (req: Ctx, res) => {
+    const who = uploader(req);
+    if (!who) return res.status(400).json({ ok: false, error: 'tenant_required' });
+
+    const q = req.query;
+    const patientName = cleanText((q.patient_name as string) ?? '', 64) || undefined;
+    const patientId = cleanText((q.patient_id as string) ?? '', 64) || undefined;
+    const accessionNumber = cleanText((q.accession_number as string) ?? '', 64).toUpperCase() || undefined;
+    const studyDescription = cleanText((q.study_description as string) ?? '', 64) || undefined;
+    const rows = Number(q.rows ?? 0);
+    const columns = Number(q.columns ?? 0);
+    if (!Number.isInteger(rows) || rows < 1 || !Number.isInteger(columns) || columns < 1) {
+      return res.status(422).json({ ok: false, error: 'rows and columns are required' });
+    }
+
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for await (const chunk of req) {
+      const buf = chunk as Buffer;
+      total += buf.length;
+      if (total > 50 * 1024 * 1024) {
+        return res.status(413).json({ ok: false, error: 'image_too_large', limitBytes: 50 * 1024 * 1024 });
+      }
+      chunks.push(buf);
+    }
+    const jpgBytes = new Uint8Array(Buffer.concat(chunks));
+
+    // JPEG magic is FF D8 FF — a file that does not start with it is not a JPEG, and
+    // wrapping it in DICOM would produce a file no viewer can decode.
+    if (jpgBytes.length < 3 || jpgBytes[0] !== 0xff || jpgBytes[1] !== 0xd8 || jpgBytes[2] !== 0xff) {
+      return res.status(422).json({ ok: false, error: 'not_a_jpeg' });
+    }
+
+    const dicom = buildSecondaryCapture({
+      jpgBytes,
+      rows,
+      columns,
+      patientName,
+      patientId,
+      accessionNumber,
+      studyDescription,
+    });
+
+    const batchId = `b-${Date.now().toString(36)}-${createHash('sha1').update(`${who.tenantId}${Math.random()}`).digest('hex').slice(0, 8)}`;
+    mkdirSync(path.join(inboxRoot, batchId), { recursive: true });
+
+    const filename = `sc-${dicom.sopInstanceUid.slice(-12)}.dcm`;
+    const storedPath = path.posix.join(batchId, filename);
+    const abs = path.join(inboxRoot, storedPath);
+
+    await (await import('node:fs/promises')).writeFile(abs, dicom.bytes);
+
+    const sha = createHash('sha256').update(dicom.bytes).digest('hex');
+    const fileId = `f-${createHash('sha1').update(`${batchId}|${filename}`).digest('hex').slice(0, 16)}`;
+
+    await db.insert(uploadBatches).values({
+      id: batchId,
+      tenantId: who.tenantId,
+      siteId: who.siteId,
+      channel: who.channel,
+      accessionHint: accessionNumber ?? null,
+      patientHint: patientName ?? null,
+      filesExpected: 1,
+      bytesDeclared: dicom.bytes.length,
+    });
+
+    await db.insert(uploadFiles).values({
+      id: fileId,
+      batchId,
+      filename,
+      storedPath,
+      bytes: dicom.bytes.length,
+      sha256: sha,
+      kind: 'dcm',
+      status: 'stored',
+    });
+
+    await db.update(uploadBatches).set({
+      status: 'sealed',
+      sealedAt: new Date(),
+      bytesReceived: dicom.bytes.length,
+    }).where(eq(uploadBatches.id, batchId));
+
+    await appendAudit(db, {
+      actorUserId: who.actorUserId,
+      actorKind: who.channel === 'agent' ? 'service' : 'human',
+      tenantId: who.tenantId,
+      action: 'upload.jpg_converted',
+      entity: 'upload_batches',
+      entityId: batchId,
+      detail: {
+        sopInstanceUid: dicom.sopInstanceUid,
+        studyInstanceUid: dicom.studyInstanceUid,
+        seriesInstanceUid: dicom.seriesInstanceUid,
+        jpgBytes: jpgBytes.length,
+        dcmBytes: dicom.bytes.length,
+        rows,
+        columns,
+      },
+    });
+
+    res.status(201).json({
+      ok: true,
+      batchId,
+      fileId,
+      sopInstanceUid: dicom.sopInstanceUid,
+      studyInstanceUid: dicom.studyInstanceUid,
+      seriesInstanceUid: dicom.seriesInstanceUid,
+      dcmBytes: dicom.bytes.length,
+    });
+  }));
 
   r.post('/batches', ah(async (req: Ctx, res) => {
     const who = uploader(req);

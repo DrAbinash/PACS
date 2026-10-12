@@ -37,6 +37,11 @@ export type PanelReaderRow = {
   openCases: number;
   lastAssignedAt: Date | null;
   onShift: boolean;
+  // A reader who declines three of four offers is telling the dispatcher something
+  // different from one who declines one of twenty. The rate is the signal the ranking
+  // uses to stop sending cases to a reader who is systematically not taking them — a
+  // pattern that would otherwise bury the queue behind a name that keeps saying no.
+  declineRate: number;
 };
 
 export async function dispatchableStudies(
@@ -127,6 +132,19 @@ export async function panelReaders(db: Db, tenantIds: number[], now: Date): Prom
                       where sh.user_id = ${users.id} and sh.status <> 'cancelled'
                         and sh.starts_at <= ${now.toISOString()}::timestamptz
                         and sh.ends_at > ${now.toISOString()}::timestamptz)`,
+    // Decline rate over the last 24 hours: the fraction of offers that came back as
+    // returned-with-decline rather than accepted. A reader with no recent offers sorts
+    // as zero, which is what a new joiner should look like. The window is a day rather
+    // than a week because a reader's pattern changes with their shift, and yesterday's
+    // night reader is not today's routing evidence.
+    declineRate: sql<number>`(
+      select case when count(*) = 0 then 0
+                  else count(*) filter (where o.return_reason = 'declined')::float / count(*)
+             end
+        from ${assignments} o
+       where o.clinician_user_id = ${users.id}
+         and o.offered_at > ${(new Date(now.getTime() - 24 * 60 * 60 * 1000)).toISOString()}::timestamptz
+    )`.mapWith(Number),
   }).from(users)
     .innerJoin(clinicianProfiles, eq(clinicianProfiles.userId, users.id))
     .leftJoin(readerAvailability, eq(readerAvailability.userId, users.id))
@@ -145,6 +163,7 @@ export async function panelReaders(db: Db, tenantIds: number[], now: Date): Prom
     subspecialtyCodes: row.subspecialtyCodes ?? [],
     modalityCodes: row.modalityCodes ?? [],
     openCases: row.openCases ?? 0,
+    declineRate: row.declineRate ?? 0,
   }));
 }
 

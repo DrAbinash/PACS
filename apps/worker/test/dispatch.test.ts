@@ -38,6 +38,7 @@ const reader = (over: Partial<ReaderCandidate> = {}): ReaderCandidate => ({
   lastSeenAt: new Date(NOW.getTime() - 5_000),
   lastAssignedAt: null,
   onShift: false,
+  declineRate: 0,
   ...over,
 });
 

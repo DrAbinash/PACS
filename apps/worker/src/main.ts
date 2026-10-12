@@ -5,6 +5,7 @@ import { escalateOnce } from './escalate.js';
 import { notifyOnce } from './notify.js';
 import { pollOnce, recheckStalled } from './ingest.js';
 import { drainOnce } from './inbox.js';
+import { createReleaseStore, releaseSweepOnce } from './release.js';
 import { reviewSweepOnce } from './review.js';
 import { createOrthancReader, createOrthancWriter } from './orthanc.js';
 import { createSmtpTransport } from './smtp.js';
@@ -36,6 +37,7 @@ const dispatch = createDispatchStore(handle.db);
 const escalation = createEscalationStore(handle.db);
 const criticals = createCriticalStore(handle.db);
 const notifications = createNotifyStore(handle.db);
+const release = createReleaseStore(handle.db);
 // Both halves have to be present before anything leaves. A relay without a public origin would
 // send a message whose only actionable line — "read it here" — is a relative link, which is a
 // letter with no address on it rather than a bug in the mailer.
@@ -93,6 +95,18 @@ async function settleReviewQueue(): Promise<void> {
   if (r.alerted > 0) {
     console.log(`review checked=${r.checked} alerted=${r.alerted} `
       + '(signed reports waiting for a second name past the threshold)');
+  }
+}
+
+// A reader who accepted a case and then walked away leaves a live lock on the study —
+// dispatch cannot re-offer it, and the case sits until the reader returns and declines
+// by hand. This sweep releases cases held by readers who went offline or stopped
+// heartbeating, so the next dispatch tick in the same cycle can re-route them.
+async function releaseStale(): Promise<void> {
+  const r = await releaseSweepOnce(release);
+  if (r.released > 0) {
+    const reasons = Object.entries(r.byReason).map(([k, v]) => `${k}:${v}`).join(',');
+    console.log(`release checked=${r.checked} released=${r.released} (${reasons})`);
   }
 }
 
@@ -157,6 +171,12 @@ async function tick(): Promise<void> {
   }
 
   try {
+    await releaseStale();
+  } catch (err) {
+    console.error('release sweep failed', err instanceof Error ? err.message : err);
+  }
+
+  try {
     // Its own label again: a clinic that was never told about a report is a different outage
     // from a case that was never routed, and the two queues do not share a failure mode.
     await notify();
@@ -205,6 +225,11 @@ if (process.argv[2] === 'dispatch-once') {
   // Only the review queue sweep. A verification run uses this to alert on reports waiting
   // for a second name without touching routing or critical loops.
   await settleReviewQueue();
+  await handle.close();
+} else if (process.argv[2] === 'release-once') {
+  // Only the release sweep. A verification run uses this to prove that a reader who went
+  // offline has their cases returned without touching routing or dispatch.
+  await releaseStale();
   await handle.close();
 } else if (process.argv[2] === 'once') {
   await tick();

@@ -12,3 +12,4 @@ export * from './pixels.js';
 export * from './png.js';
 export * from './audit.js';
 export * from './validate.js';
+export * from './dicom-sc.js';

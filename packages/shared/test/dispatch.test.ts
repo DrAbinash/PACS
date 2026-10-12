@@ -28,6 +28,7 @@ const reader = (over: Partial<ReaderCandidate> = {}): ReaderCandidate => ({
   lastSeenAt: seen(5),
   lastAssignedAt: null,
   onShift: false,
+  declineRate: 0,
   ...over,
 });
 
