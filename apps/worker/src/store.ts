@@ -118,6 +118,7 @@ export function createStore(db: Db, nodeId: string): StorePort {
         studyDate: r.orderedAt ? ymd(r.orderedAt) : null,
         modalityCode: r.modalityCode ?? null,
         siteId: r.siteId,
+        priority: r.priority,
       })) satisfies OrderCandidate[];
     },
 
