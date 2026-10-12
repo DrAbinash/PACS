@@ -19,7 +19,7 @@ function* walk(bytes: Uint8Array, start: number, stop: number): Generator<El> {
     const vr = String.fromCharCode(bytes[off + 4]!, bytes[off + 5]!);
     const extended = ['OB', 'OW', 'SQ', 'UN', 'UT'].includes(vr);
     const hdr = extended ? 12 : 8;
-    let len = extended ? dv.getUint32(off + 8, true) : dv.getUint16(off + 6, true);
+    const len = extended ? dv.getUint32(off + 8, true) : dv.getUint16(off + 6, true);
     if (len === 0xffffffff) {
       // Undefined length: the value runs to the boundary (pixel data encapsulation).
       yield { group, element, vr, value: bytes.subarray(off + hdr, stop) };

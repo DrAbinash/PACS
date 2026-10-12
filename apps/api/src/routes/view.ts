@@ -1,6 +1,6 @@
 import { and, eq, inArray } from 'drizzle-orm';
 import { type Db, appendAudit, assignments, patients, reports, studies, storageNodes } from '@telrad/db';
-import { currentVersion, decodePng16, frameToBytes, mayReadReport, parseMatlabFrame, tagValue } from '@telrad/shared';
+import { currentVersion, decodePng16, frameToBytes, mayReadReport, tagValue } from '@telrad/shared';
 import { Router, type Response } from 'express';
 import { OrthancError, type OrthancClient } from '../orthanc.js';
 import { requireAuth, requireRole, scoped, scopeTenant, type Ctx } from '../auth.js';

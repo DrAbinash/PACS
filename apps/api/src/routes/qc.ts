@@ -1,5 +1,5 @@
 import { and, eq, gte, lte, sql } from 'drizzle-orm';
-import { type Db, assignments, criticalEvents, reports, slaClocks, studies } from '@telrad/db';
+import { type Db, assignments, criticalEvents, slaClocks, studies } from '@telrad/db';
 import { Router } from 'express';
 import { requireAuth, requireRole, scoped, type Ctx } from '../auth.js';
 import { ah } from '../handler.js';

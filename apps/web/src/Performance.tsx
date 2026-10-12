@@ -39,7 +39,7 @@ export function Performance({ show }: { show: boolean }) {
   useEffect(() => {
     if (!show) return;
     void load(applied ?? { from, to });
-  }, [show, load, applied]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [show, load, applied]);
 
   if (!show) return null;
 
