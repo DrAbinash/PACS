@@ -160,6 +160,12 @@ services:
       # cadence. Empty means alerts stay audit-only, which the worker states at boot.
       TR_OPS_EMAIL: ${TR_OPS_EMAIL:-}
       TR_OPS_DIGEST_MINUTES: ${TR_OPS_DIGEST_MINUTES:-5}
+      # The WhatsApp channel: dormant until the Meta Cloud API credentials land. Empty values
+      # mean whatsapp rows queue and wait, exactly as email rows wait without a relay.
+      TR_WHATSAPP_TOKEN: ${TR_WHATSAPP_TOKEN:-}
+      TR_WHATSAPP_PHONE_ID: ${TR_WHATSAPP_PHONE_ID:-}
+      TR_WHATSAPP_TEMPLATE: ${TR_WHATSAPP_TEMPLATE:-}
+      TR_WHATSAPP_LANGUAGE: ${TR_WHATSAPP_LANGUAGE:-en}
       TR_LOG_LEVEL: ${TR_LOG_LEVEL:-info}
       TZ: UTC
     depends_on:

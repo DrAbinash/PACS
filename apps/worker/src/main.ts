@@ -11,6 +11,7 @@ import { reviewSweepOnce } from './review.js';
 import { createOrthancReader, createOrthancWriter } from './orthanc.js';
 import { opsDigestOnce } from './ops.js';
 import { createSmtpTransport } from './smtp.js';
+import { createWhatsAppTransport } from './whatsapp.js';
 import { createCriticalStore, createDispatchStore, createEscalationStore, createInboxStore, createNotifyStore, createOpsStore, createStore } from './store.js';
 
 function env(name: string): string {
@@ -49,6 +50,17 @@ const smtp = createSmtpTransport({
   from: process.env.TR_SMTP_FROM ?? null,
 });
 const publicUrl = (process.env.TR_PUBLIC_URL ?? '').replace(/\/+$/, '');
+// The WhatsApp half of the outbox, dormant until Meta's credentials exist. An empty TR_WHATSAPP_*
+// is a documented state, not a misconfiguration: the transport reports unconfigured, whatsapp
+// rows queue exactly as email rows do, and they wait until the env carries the token — no code
+// changes on the day the API is granted. TR_WHATSAPP_TEMPLATE must name the pre-approved
+// template whose placeholders appear in the order reportReadyTemplateParams produces.
+const whatsapp = createWhatsAppTransport({
+  token: process.env.TR_WHATSAPP_TOKEN ?? null,
+  phoneNumberId: process.env.TR_WHATSAPP_PHONE_ID ?? null,
+  templateName: process.env.TR_WHATSAPP_TEMPLATE ?? null,
+  language: process.env.TR_WHATSAPP_LANGUAGE ?? 'en',
+});
 // The ops digest rides the same relay as the clinic mail but carries none of its content: it
 // reads the sweeps' alert audit rows back to one operator address on a bounded cadence. An
 // empty address is a documented state — alerts stay audit-only and the boot line says so.
@@ -56,16 +68,19 @@ const opsEmail = process.env.TR_OPS_EMAIL || null;
 const opsDigestMinutes = Math.max(Number(process.env.TR_OPS_DIGEST_MINUTES ?? 5), 1);
 
 async function notify(): Promise<void> {
-  if (!smtp.configured) return;
+  // Either channel alone is enough to run the sweep; the sweep gates each row on its own
+  // transport, so a deployment with mail but no Meta account still drains its email queue.
+  if (!smtp.configured && !whatsapp.configured) return;
   if (publicUrl === '') {
-    console.warn('notify skipped: TR_SMTP_URL is set but TR_PUBLIC_URL is not, so the message '
-      + 'would carry no link to the portal');
+    console.warn('notify skipped: a transport is configured but TR_PUBLIC_URL is not, so the '
+      + 'message would carry no link to the portal');
     return;
   }
-  const n = await notifyOnce(notifications, smtp, { portalUrl: `${publicUrl}/portal` });
+  const n = await notifyOnce(notifications, { email: smtp, whatsapp }, { portalUrl: `${publicUrl}/portal` });
   if (n.sent + n.retried + n.dead + n.refused > 0) {
     console.log(`notify checked=${n.checked} sent=${n.sent} retried=${n.retried} dead=${n.dead} `
-      + `refused=${n.refused} via=${smtp.label}`);
+      + `refused=${n.refused} via=${smtp.configured ? smtp.label : ''}`
+      + `${smtp.configured && whatsapp.configured ? '+' : ''}${whatsapp.configured ? whatsapp.label : ''}`);
   }
 }
 
@@ -235,7 +250,8 @@ async function tick(): Promise<void> {
 
 console.log(`telrad worker starting node=${nodeId} poll=${pollSeconds}s mode=${process.argv[2] ?? 'loop'} `
   + `mail=${smtp.configured ? `smtp via ${smtp.label}` : 'not configured (queued notifications will wait)'} `
-  + `ops=${opsEmail ? `digest to ${opsEmail} every ${opsDigestMinutes}m` : 'not configured (alerts stay audit-only)'}`);
+  + `ops=${opsEmail ? `digest to ${opsEmail} every ${opsDigestMinutes}m` : 'not configured (alerts stay audit-only)'} `
+  + `wa=${whatsapp.configured ? whatsapp.label : 'not configured (whatsapp rows will wait)'}`);
 
 if (process.argv[2] === 'dispatch-once') {
   // The routing half of a tick with no ingest beside it: the critical clocks, then

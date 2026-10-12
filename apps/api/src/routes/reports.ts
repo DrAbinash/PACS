@@ -6,7 +6,7 @@ import {
 import {
   REPORT_SECTIONS, type Grade, amendDecision, countersignDecision, currentVersion,
   deliverDecision, deliveryIdempotencyKey, mayReadReport, missingSections, needsSecondName,
-  nextVersion, signDecision, stateAllows,
+  nextVersion, normalisePhone, signDecision, stateAllows,
 } from '@telrad/shared';
 import { Router, type Response } from 'express';
 import { requireAuth, requireRole, scoped, scopeTenant, type Ctx, type Principal } from '../auth.js';
@@ -873,6 +873,25 @@ export function reportsRouter(db: Db): Router {
       }).onConflictDoNothing({ target: reportDeliveries.idempotencyKey });
     }
 
+    // The whatsapp row is queued on the same terms as the email: the row is the promise, the
+    // worker keeps it, and whether Meta's credentials exist is the worker's concern, not the
+    // desk's. A phone that is not a full international number queues nothing — completing it
+    // with a guessed country code is how a notice ends up in somebody else's chat.
+    const waPhone = normalisePhone(row.referringPhone);
+    const whatsappQueued = waPhone !== null;
+    if (waPhone !== null) {
+      await db.insert(reportDeliveries).values({
+        reportId: id,
+        tenantId: row.tenantId,
+        channel: 'whatsapp',
+        recipient: waPhone,
+        status: 'pending',
+        attemptNo: 0,
+        nextAttemptAt: now,
+        idempotencyKey: deliveryIdempotencyKey({ reportId: id, version: row.version, channel: 'whatsapp' }),
+      }).onConflictDoNothing({ target: reportDeliveries.idempotencyKey });
+    }
+
     await appendAudit(db, {
       actorUserId: p.userId, actorKind: 'human', tenantId: row.tenantId,
       action: 'report.delivered', entity: 'reports', entityId: String(id),
@@ -887,12 +906,23 @@ export function reportsRouter(db: Db): Router {
         pdfBytes: rendered.bytes.length,
         pdfPages: rendered.pages,
         requiredSecondName: row.requiresReviewer,
-        // Whether the clinic is about to be told, and to what address. Recorded at the moment of
-        // release rather than derived later, because the referral can be edited afterwards and
-        // the question "did you email Dr Rao" is about this instant.
-        notification: emailQueued
-          ? { channel: 'email', recipient: row.referringEmail, status: 'pending' }
-          : { channel: 'email', recipient: null, status: 'no_referring_email' },
+        // Whether the clinic is about to be told, and to what address, per channel. Recorded at
+        // the moment of release rather than derived later, because the referral can be edited
+        // afterwards and the question "did you email Dr Rao" is about this instant. A phone that
+        // never normalised is named as such rather than folded into "no phone": the record shows
+        // the desk typed something, and what they typed was not usable.
+        notification: {
+          email: emailQueued
+            ? { channel: 'email', recipient: row.referringEmail, status: 'pending' }
+            : { channel: 'email', recipient: null, status: 'no_referring_email' },
+          whatsapp: whatsappQueued
+            ? { channel: 'whatsapp', recipient: waPhone, status: 'pending' }
+            : {
+                channel: 'whatsapp',
+                recipient: null,
+                status: row.referringPhone === null ? 'no_referring_phone' : 'referring_phone_unusable',
+              },
+        },
         // Every loop that was open or closed at the moment the document left, with the name
         // that closed it. This is the row an investigator reads to establish that a critical
         // finding was acknowledged *before* the report went out rather than after.

@@ -1,8 +1,10 @@
 import {
   type AttemptOutcome, afterAttempt, containsNoPatientIdentifiers, mayAttempt,
-  reportReadyBody, reportReadySubject, type ReportReadyMessage,
+  type DeliveryChannel, reportReadyBody, reportReadySubject, type ReportReadyMessage,
+  reportReadyTemplateParams,
 } from '@telrad/shared';
 import type { AuditInput } from '@telrad/db';
+import type { WhatsAppTransport } from './whatsapp.js';
 
 /**
  * The outbox drain: take the messages the desk has queued, try them once, and write down what
@@ -18,6 +20,10 @@ export type QueuedNotification = {
   reportId: number;
   tenantId: number;
   recipient: string;
+  // Which wire this row rides. The desk decides the channel when it queues; the sweep only
+  // routes by it, because the two transports take different messages and a row sent down the
+  // wrong one is a message built for neither.
+  channel: DeliveryChannel;
   // The full set, not just the two the query filters for: a row that arrives here already sent
   // or already dead is refused by `mayAttempt` rather than sent again, and that guard cannot
   // exist if the type pretends the query is perfect.
@@ -86,29 +92,56 @@ function messageFor(row: QueuedNotification, portalUrl: string): ReportReadyMess
 
 export async function notifyOnce(
   port: NotifyPort,
-  transport: NotifyTransport,
+  transports: { email: NotifyTransport; whatsapp: WhatsAppTransport },
   opts: { now?: () => Date; limit?: number; portalUrl?: string } = {},
 ): Promise<NotifyResult> {
   const now = (opts.now ?? (() => new Date()))();
   const portalUrl = opts.portalUrl ?? 'https://telrad.local/portal';
 
-  // An unconfigured transport leaves the rows exactly as they are. Marking them `dead` because
-  // this box has no SMTP relay would destroy the record of what still has to be sent, and the
-  // next operator would have no idea which reports a clinic was never told about.
-  if (!transport.configured) return emptyNotifyResult(true);
+  // No channel's transport is configured: leave every row exactly as it is. Marking them `dead`
+  // because this box has no relay — or no Meta credentials — would destroy the record of what
+  // still has to be sent, and the next operator would have no idea which reports a clinic was
+  // never told about.
+  if (!transports.email.configured && !transports.whatsapp.configured) return emptyNotifyResult(true);
 
   const r = emptyNotifyResult();
   for (const row of await port.due(now, opts.limit ?? 50)) {
     if (!mayAttempt({ status: row.status, attemptNo: row.attemptNo, nextAttemptAt: row.nextAttemptAt }, now)) {
       continue;
     }
+
+    // Each channel is gated on its own transport: a deployment with mail but no Meta
+    // credentials drains its email rows and leaves its whatsapp rows waiting, exactly the way
+    // everything waits on a box with no relay at all. The outbox board says which rows those
+    // are, so a queue that is not moving is visible, not silent.
+    const transport = row.channel === 'whatsapp' ? transports.whatsapp : transports.email;
+    if (!transport.configured) continue;
     r.checked += 1;
 
-    const message = messageFor(row, portalUrl);
-    const subject = reportReadySubject(message);
-    const text = reportReadyBody(message);
+    // The channels build different messages — email a subject and a body, WhatsApp the four
+    // positional template parameters — but everything after the build is one path: the
+    // identifier check, the refusal, the attempt, the record and the audit. So the build is
+    // the only branch.
+    let bodyText: string;
+    let send: () => Promise<SendResult>;
+    if (row.channel === 'whatsapp') {
+      const params = reportReadyTemplateParams({
+        centreName: row.centreName ?? row.tenantCode ?? 'Radiology centre',
+        accession: row.accession ?? `report-${row.reportId}`,
+        reportVersion: row.version,
+        portalUrl,
+      });
+      bodyText = params.join('\n');
+      send = () => transports.whatsapp.send({ to: row.recipient, params });
+    } else {
+      const message = messageFor(row, portalUrl);
+      const subject = reportReadySubject(message);
+      const text = reportReadyBody(message);
+      bodyText = `${subject}\n${text}`;
+      send = () => transports.email.send({ to: row.recipient, subject, text });
+    }
 
-    if (!containsNoPatientIdentifiers(`${subject}\n${text}`, [row.patientName, row.patientMrn])) {
+    if (!containsNoPatientIdentifiers(bodyText, [row.patientName, row.patientMrn])) {
       // Refused rather than retried: a message that carries an identifier is not a transient
       // failure, and trying it five times would put the same name on the wire five times.
       r.refused += 1;
@@ -119,7 +152,7 @@ export async function notifyOnce(
         actorUserId: null, actorKind: 'system', tenantId: row.tenantId,
         action: 'notify.refused', entity: 'report_deliveries', entityId: String(row.id),
         detail: {
-          reportId: row.reportId, channel: 'email', reason: 'patient_identifier_in_body',
+          reportId: row.reportId, channel: row.channel, reason: 'patient_identifier_in_body',
           // The name itself is deliberately not recorded: an audit trail that echoes the
           // identifier it just refused has not solved anything.
           recipient: row.recipient,
@@ -129,7 +162,7 @@ export async function notifyOnce(
     }
 
     const attemptNo = row.attemptNo + 1;
-    const result = await transport.send({ to: row.recipient, subject, text });
+    const result = await send();
     const outcome = afterAttempt({
       attemptNo, ok: result.ok, errorCode: result.ok ? null : result.error, now,
     });
@@ -146,7 +179,7 @@ export async function notifyOnce(
       detail: {
         reportId: row.reportId,
         accession: row.accession,
-        channel: 'email',
+        channel: row.channel,
         recipient: row.recipient,
         attemptNo,
         errorCode: outcome.errorCode,

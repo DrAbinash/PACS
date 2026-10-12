@@ -514,6 +514,7 @@ export function createNotifyStore(db: Db): NotifyPort {
         reportId: reportDeliveries.reportId,
         tenantId: reportDeliveries.tenantId,
         recipient: reportDeliveries.recipient,
+        channel: reportDeliveries.channel,
         status: reportDeliveries.status,
         attemptNo: reportDeliveries.attemptNo,
         nextAttemptAt: reportDeliveries.nextAttemptAt,
@@ -534,7 +535,9 @@ export function createNotifyStore(db: Db): NotifyPort {
         .leftJoin(tenants, eq(tenants.id, reports.tenantId))
         .leftJoin(patients, eq(patients.id, studies.patientId))
         .where(and(
-          eq(reportDeliveries.channel, 'email'),
+          // Both wired channels; the sweep gates each row on its own transport, so a whatsapp
+          // row here with no Meta credentials waits rather than dies.
+          inArray(reportDeliveries.channel, ['email', 'whatsapp']),
           inArray(reportDeliveries.status, ['pending', 'failed']),
           or(isNull(reportDeliveries.nextAttemptAt), lte(reportDeliveries.nextAttemptAt, now)),
         ))

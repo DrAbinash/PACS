@@ -7,6 +7,7 @@ export * from './escalation.js';
 export * from './report.js';
 export * from './criticals.js';
 export * from './notify.js';
+export * from './whatsapp.js';
 export * from './ops.js';
 export * from './money.js';
 export * from './pixels.js';
