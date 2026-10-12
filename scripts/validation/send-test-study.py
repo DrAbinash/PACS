@@ -99,7 +99,8 @@ def main():
 
     instance_id = created[-1]["ID"]
     inst = rest(f"/instances/{instance_id}")
-    meta_back = rest(f"/instances/{instance_id}/metadata")
+    # /metadata answers the list of metadata keys; the tags dict is /simplified-tags.
+    meta_back = rest(f"/instances/{instance_id}/simplified-tags")
     tags = meta_back.get("Tags", {})
     path = inst.get("Path", "")
 
