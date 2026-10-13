@@ -1,4 +1,4 @@
-import { sql } from 'drizzle-orm';
+import { sql, eq } from 'drizzle-orm';
 import {
   auditLog,
   clinicianProfiles,
@@ -291,6 +291,30 @@ async function addReader(args: Args) {
   }
 }
 
+async function resetPassword(args: Args) {
+  const handle = await openDb(dbUrl());
+  const { db } = handle;
+  try {
+    const email = need(args, 'email').toLowerCase();
+    const password = need(args, 'password');
+    checkPasswordStrength(password);
+
+    const [user] = await db.select().from(users).where(sql`lower(${users.email}) = ${email}`).limit(1);
+    if (!user) throw new Error(`${email} not found`);
+
+    await db.update(users).set({
+      passwordHash: await hashPassword(password),
+      passwordAlgo: 'scrypt',
+      failedAttempts: 0,
+      lockedUntil: null,
+    }).where(eq(users.id, user.id));
+
+    console.log(`password reset for ${email} id=${user.id}`);
+  } finally {
+    await handle.close();
+  }
+}
+
 const command = process.argv[2];
 if (command === 'migrate') {
   await runMigrations(dbUrl());
@@ -298,9 +322,11 @@ if (command === 'migrate') {
   await bootstrap(parse(process.argv.slice(3)));
 } else if (command === 'add-reader') {
   await addReader(parse(process.argv.slice(3)));
+} else if (command === 'reset-password') {
+  await resetPassword(parse(process.argv.slice(3)));
 } else if (command === 'verify-audit') {
   await verifyAudit();
 } else {
-  console.error('usage: telrad-api <migrate|bootstrap|add-reader|verify-audit> [--flags]');
+  console.error('usage: telrad-api <migrate|bootstrap|add-reader|reset-password|verify-audit> [--flags]');
   process.exitCode = 2;
 }
