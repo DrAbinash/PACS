@@ -402,7 +402,24 @@ export type PreviewResult = {
 export const api = {
   session: () => call<Session>('/v1/auth/session'),
   login: (email: string, password: string) =>
-    call<Session>('/v1/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
+    call<Session | { ok: boolean; requiresTotp: true; tempToken: string }>(
+      '/v1/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
+  totpComplete: (tempToken: string, code: string, useBackup = false) =>
+    call<Session>('/v1/auth/totp/complete', {
+      method: 'POST', body: JSON.stringify({ tempToken, code, useBackup }),
+    }),
+  totpSetup: () =>
+    call<{ ok: boolean; secret: string; otpauthUri: string }>('/v1/auth/totp/setup', { method: 'POST', body: '{}' }),
+  totpVerify: (code: string) =>
+    call<{ ok: boolean; backupCodes: string[] }>('/v1/auth/totp/verify', {
+      method: 'POST', body: JSON.stringify({ code }),
+    }),
+  totpDisable: (password: string) =>
+    call<{ ok: boolean }>('/v1/auth/totp/disable', {
+      method: 'POST', body: JSON.stringify({ password }),
+    }),
+  totpStatus: () =>
+    call<{ ok: boolean; totpEnabled: boolean; backupCodeCount: number }>('/v1/auth/totp/status'),
   logout: () => call<{ ok: boolean }>('/v1/auth/logout', { method: 'POST', body: '{}' }),
   heartbeat: () =>
     call<{ color: PresenceColor; code: string; label: string; routable: boolean; openCases: number; maxQueueSize: number }>(

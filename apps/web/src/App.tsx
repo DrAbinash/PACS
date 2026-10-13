@@ -55,22 +55,69 @@ function ago(seconds: number | null): string {
 function Login({ onSignedIn }: { onSignedIn: (s: Session) => void }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [totpCode, setTotpCode] = useState('');
+  const [tempToken, setTempToken] = useState<string | null>(null);
+  const [useBackup, setUseBackup] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  return (
-    <form className="login card" onSubmit={async (e) => {
-      e.preventDefault();
-      setBusy(true);
-      setError(null);
-      try {
-        onSignedIn(await api.login(email, password));
-      } catch (err) {
-        setError(err instanceof ApiError && err.status === 401 ? 'Wrong email or password' : 'Cannot reach the server');
-      } finally {
-        setBusy(false);
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      if (tempToken) {
+        // Second factor step
+        const result = await api.totpComplete(tempToken, totpCode, useBackup);
+        onSignedIn(result);
+      } else {
+        // Initial login
+        const result = await api.login(email, password);
+        if ('requiresTotp' in result && result.requiresTotp) {
+          setTempToken(result.tempToken);
+        } else {
+          onSignedIn(result as Session);
+        }
       }
-    }}>
+    } catch (err) {
+      setError(err instanceof ApiError && err.status === 401 ? 'Wrong email or password' : 'Cannot reach the server');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (tempToken) {
+    return (
+      <form className="login card" onSubmit={handleSubmit}>
+        <h2>Two-factor authentication</h2>
+        <p style={{ fontSize: '0.9em', color: '#666', marginBottom: '1em' }}>
+          {useBackup ? 'Enter a backup code' : 'Enter the code from your authenticator app'}
+        </p>
+        <input
+          name="totp"
+          type="text"
+          inputMode="numeric"
+          placeholder={useBackup ? 'backup code' : '6-digit code'}
+          value={totpCode}
+          onChange={(e) => setTotpCode(e.target.value)}
+          autoFocus
+          required
+        />
+        <button className="primary" disabled={busy}>{busy ? 'Verifying…' : 'Verify'}</button>
+        <button
+          type="button"
+          style={{ background: 'none', border: 'none', color: '#0066cc', cursor: 'pointer', fontSize: '0.9em' }}
+          onClick={() => { setUseBackup(!useBackup); setTotpCode(''); }}
+        >
+          {useBackup ? 'Use authenticator app instead' : 'Use a backup code'}
+        </button>
+        {error && <span className="error">{error}</span>}
+      </form>
+    );
+  }
+
+  return (
+    <form className="login card" onSubmit={handleSubmit}>
       <h2>telrad</h2>
       <input name="email" type="email" placeholder="email" autoComplete="username"
         value={email} onChange={(e) => setEmail(e.target.value)} required />
@@ -762,6 +809,149 @@ function Row({ row, me }: { row: PanelRow; me: boolean }) {
   );
 }
 
+function TotpSettings({ onClose }: { onClose: () => void }) {
+  const [status, setStatus] = useState<{ totpEnabled: boolean; backupCodeCount: number } | null>(null);
+  const [setupData, setSetupData] = useState<{ secret: string; otpauthUri: string } | null>(null);
+  const [verifyCode, setVerifyCode] = useState('');
+  const [backupCodes, setBackupCodes] = useState<string[] | null>(null);
+  const [disablePassword, setDisablePassword] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api.totpStatus().then((s) => setStatus({ totpEnabled: s.totpEnabled, backupCodeCount: s.backupCodeCount })).catch(() => {});
+  }, []);
+
+  const handleSetup = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await api.totpSetup();
+      setSetupData({ secret: data.secret, otpauthUri: data.otpauthUri });
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to start setup');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleVerify = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api.totpVerify(verifyCode);
+      setBackupCodes(result.backupCodes);
+      setStatus({ totpEnabled: true, backupCodeCount: result.backupCodes.length });
+      setSetupData(null);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Invalid code');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleDisable = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.totpDisable(disablePassword);
+      setStatus({ totpEnabled: false, backupCodeCount: 0 });
+      setDisablePassword('');
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Failed to disable');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="modal" style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+      <div className="card" style={{ maxWidth: '500px', maxHeight: '90vh', overflow: 'auto' }}>
+        <h2>Two-factor authentication</h2>
+
+        {status?.totpEnabled ? (
+          <>
+            <p style={{ color: '#28a745', fontWeight: 'bold' }}>✓ Two-factor authentication is enabled</p>
+            <p style={{ fontSize: '0.9em', color: '#666' }}>
+              Backup codes remaining: {status.backupCodeCount}
+            </p>
+            <hr />
+            <h3>Disable 2FA</h3>
+            <input
+              type="password"
+              placeholder="Enter your password to confirm"
+              value={disablePassword}
+              onChange={(e) => setDisablePassword(e.target.value)}
+              style={{ width: '100%', marginBottom: '0.5em' }}
+            />
+            <button onClick={handleDisable} disabled={busy || !disablePassword}>
+              {busy ? 'Disabling…' : 'Disable 2FA'}
+            </button>
+          </>
+        ) : setupData ? (
+          <>
+            <p style={{ fontSize: '0.9em', marginBottom: '1em' }}>
+              Scan this QR code with your authenticator app (Google Authenticator, Authy, etc.):
+            </p>
+            <div style={{ textAlign: 'center', margin: '1em 0' }}>
+              <img
+                src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(setupData.otpauthUri)}`}
+                alt="QR Code"
+                style={{ border: '1px solid #ddd', padding: '10px' }}
+              />
+            </div>
+            <p style={{ fontSize: '0.85em', color: '#666', wordBreak: 'break-all' }}>
+              Or enter this secret manually: <code>{setupData.secret}</code>
+            </p>
+            <hr />
+            <p>Enter the 6-digit code from your app to verify:</p>
+            <input
+              type="text"
+              inputMode="numeric"
+              placeholder="6-digit code"
+              value={verifyCode}
+              onChange={(e) => setVerifyCode(e.target.value)}
+              style={{ width: '100%', marginBottom: '0.5em' }}
+            />
+            <button className="primary" onClick={handleVerify} disabled={busy || verifyCode.length !== 6}>
+              {busy ? 'Verifying…' : 'Verify and enable'}
+            </button>
+            <button onClick={() => setSetupData(null)} style={{ marginLeft: '0.5em' }}>Cancel</button>
+          </>
+        ) : (
+          <>
+            <p>Two-factor authentication adds an extra layer of security to your account.</p>
+            <button className="primary" onClick={handleSetup} disabled={busy}>
+              {busy ? 'Loading…' : 'Set up 2FA'}
+            </button>
+          </>
+        )}
+
+        {backupCodes && (
+          <div style={{ marginTop: '1em', padding: '1em', background: '#fff3cd', border: '1px solid #ffc107', borderRadius: '4px' }}>
+            <h3 style={{ color: '#856404' }}>⚠ Save your backup codes</h3>
+            <p style={{ fontSize: '0.9em', color: '#856404' }}>
+              Store these codes in a safe place. Each code can only be used once if you lose access to your authenticator app.
+            </p>
+            <div style={{ fontFamily: 'monospace', fontSize: '0.9em', lineHeight: '1.8' }}>
+              {backupCodes.map((code, i) => (
+                <div key={i}>{code}</div>
+              ))}
+            </div>
+            <button onClick={() => setBackupCodes(null)} style={{ marginTop: '0.5em' }}>
+              I've saved these codes
+            </button>
+          </div>
+        )}
+
+        {error && <p style={{ color: '#dc3545', marginTop: '1em' }}>{error}</p>}
+
+        <button onClick={onClose} style={{ marginTop: '1em' }}>Close</button>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [booting, setBooting] = useState(true);
@@ -773,10 +963,12 @@ export default function App() {
   const [routableOnly, setRoutableOnly] = useState(false);
   const [busy, setBusy] = useState(false);
   const [openStudy, setOpenStudy] = useState<number | null>(null);
+  const [showTotpSettings, setShowTotpSettings] = useState(false);
 
   const isReader = session !== null && READER_ROLES.includes(session.user.role);
   const isDesk = session !== null && DESK_ROLES.includes(session.user.role);
   const isOperator = session !== null && OPERATOR_ROLES.includes(session.user.role);
+  const isOwner = session !== null && session.user.role === 'owner';
 
   useEffect(() => {
     api.session().then(setSession).catch(() => setSession(null)).finally(() => setBooting(false));
@@ -871,7 +1063,17 @@ export default function App() {
           <span className="count amber">{counts.amber} not routable</span>
           <span className="count red">{counts.red} off</span>
         </div>
+        {isOwner && (
+          <button
+            onClick={() => setShowTotpSettings(true)}
+            style={{ marginLeft: 'auto', fontSize: '0.9em' }}
+          >
+            🔒 Security
+          </button>
+        )}
       </header>
+
+      {showTotpSettings && <TotpSettings onClose={() => setShowTotpSettings(false)} />}
 
       <main>
         {feedError && (
