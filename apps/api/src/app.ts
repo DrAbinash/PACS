@@ -30,6 +30,7 @@ import { tenantsRouter } from './routes/tenants.js';
 import { uploadsRouter } from './routes/uploads.js';
 import { viewRouter } from './routes/view.js';
 import { worklistRouter } from './routes/worklist.js';
+import { metricsRouter } from './metrics.js';
 import type { OrthancClient } from './orthanc.js';
 
 const MAX_FAILED = 5;
@@ -389,6 +390,7 @@ export function createApp(deps: AppDeps): Express {
   app.use('/v1', performanceRouter(db));
   app.use('/v1', slaRouter(db));
   app.use('/v1', tenantsRouter(db));
+  app.use(metricsRouter(db));
 
   // An unknown `/v1/...` path answers with JSON, not Express's HTML 404. Every other
   // failure mode in this API speaks JSON, and a client should not have to special-case one.
