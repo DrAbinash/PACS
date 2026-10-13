@@ -674,6 +674,20 @@ export const settings = telrad.table('settings', {
   updatedAt: at('updated_at'),
 });
 
+// Idempotency keys for state transitions: a network retry on POST /accept must not
+// create two acceptances, and a double-click on /sign must not produce two signatures.
+// The key is client-supplied (Idempotency-Key header), stored with the response, and
+// returned unchanged on duplicate. Keys expire after 24 hours to keep the table small.
+export const idempotencyKeys = telrad.table('idempotency_keys', {
+  key: text('key').primaryKey(),
+  route: text('route').notNull(),
+  entityId: integer('entity_id').notNull(),
+  responseStatus: smallint('response_status').notNull(),
+  responseBody: jsonb('response_body').notNull(),
+  createdAt: at('created_at'),
+  expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'date' }).notNull(),
+});
+
 function serialId(name: string) {
   // Identity + primary key in one place, because every use of this helper in this
   // file is a table's id. Without the primary key, Postgres refuses any foreign

@@ -23,6 +23,7 @@ import {
 import { Router } from 'express';
 import { requireAuth, requireRole, scoped, scopeTenant, type Ctx } from '../auth.js';
 import { ah } from '../handler.js';
+import { checkIdempotency, storeIdempotency } from '../idempotency.js';
 
 const READER_ROLES = ['radiologist', 'reviewer'];
 const BOARD_ROLES = ['owner', 'console', 'radiologist', 'reviewer'];
@@ -117,6 +118,10 @@ export function worklistRouter(db: Db): Router {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ ok: false, error: 'bad_id' });
 
+    const idemKey = req.headers['idempotency-key'] as string | undefined ?? null;
+    const cached = await checkIdempotency(db, idemKey, 'assignment.accept', id);
+    if (cached) return res.status(cached.status).json(cached.body);
+
     const now = new Date();
     // One conditional update rather than a read-then-write: two readers cannot both
     // turn the same offer into a lock, and the loser gets a 409 instead of quietly
@@ -142,9 +147,13 @@ export function worklistRouter(db: Db): Router {
       // Another reader's assignment and a nonexistent one both answer 404, so an id
       // cannot be probed for existence across readers.
       if (!found || found.userId !== req.principal!.userId) {
-        return res.status(404).json({ ok: false, error: 'not_found' });
+        const body = { ok: false, error: 'not_found' };
+        await storeIdempotency(db, idemKey, 'assignment.accept', id, 404, body);
+        return res.status(404).json(body);
       }
-      return res.status(409).json({ ok: false, error: 'not_offered', state: found.state });
+      const body = { ok: false, error: 'not_offered', state: found.state };
+      await storeIdempotency(db, idemKey, 'assignment.accept', id, 409, body);
+      return res.status(409).json(body);
     }
 
     const [study] = await db.select({ priority: studies.priority }).from(studies)
@@ -162,7 +171,9 @@ export function worklistRouter(db: Db): Router {
       detail: { studyId: row.studyId, priority: study?.priority ?? null, attemptNo: row.attemptNo },
     });
 
-    res.json({ ok: true, assignmentId: row.id, studyId: row.studyId, acceptedAt: now, lockToken: row.lockToken });
+    const body = { ok: true, assignmentId: row.id, studyId: row.studyId, acceptedAt: now, lockToken: row.lockToken };
+    await storeIdempotency(db, idemKey, 'assignment.accept', id, 200, body);
+    res.json(body);
   }));
 
   r.post('/assignments/:id/decline', ah(async (req: Ctx, res) => {
@@ -173,6 +184,10 @@ export function worklistRouter(db: Db): Router {
     if (!reason) {
       return res.status(422).json({ ok: false, error: 'a reason is required to hand a case back' });
     }
+
+    const idemKey = req.headers['idempotency-key'] as string | undefined ?? null;
+    const cached = await checkIdempotency(db, idemKey, 'assignment.decline', id);
+    if (cached) return res.status(cached.status).json(cached.body);
 
     const now = new Date();
     const [row] = await db.update(assignments)
@@ -188,11 +203,17 @@ export function worklistRouter(db: Db): Router {
       const [existing] = await db.select({ state: assignments.state }).from(assignments)
         .where(and(eq(assignments.id, id), eq(assignments.clinicianUserId, req.principal!.userId)))
         .limit(1);
-      if (!existing) return res.status(404).json({ ok: false, error: 'not_found' });
+      if (!existing) {
+        const body = { ok: false, error: 'not_found' };
+        await storeIdempotency(db, idemKey, 'assignment.decline', id, 404, body);
+        return res.status(404).json(body);
+      }
       // 'reading' means a draft exists. Handing that back is a different operation from
       // declining, and the report path is not built, so this refuses rather than
       // silently discarding work in progress.
-      return res.status(409).json({ ok: false, error: 'cannot_return', state: existing.state });
+      const body = { ok: false, error: 'cannot_return', state: existing.state };
+      await storeIdempotency(db, idemKey, 'assignment.decline', id, 409, body);
+      return res.status(409).json(body);
     }
 
     await appendAudit(db, {
@@ -200,7 +221,9 @@ export function worklistRouter(db: Db): Router {
       action: 'assignment.returned', entity: 'assignments', entityId: String(row.id),
       detail: { studyId: row.studyId, reason },
     });
-    res.json({ ok: true, assignmentId: row.id, studyId: row.studyId, state: 'returned' });
+    const body = { ok: true, assignmentId: row.id, studyId: row.studyId, state: 'returned' };
+    await storeIdempotency(db, idemKey, 'assignment.decline', id, 200, body);
+    res.json(body);
   }));
 
   // The operator's question when a case is sitting: not "is anything unassigned" but

@@ -14,6 +14,7 @@ import {
   criticalsForStudy, describeCritical, openCriticalCounts, type DescribedCritical,
 } from '../criticals-reads.js';
 import { ah } from '../handler.js';
+import { checkIdempotency, storeIdempotency } from '../idempotency.js';
 import { renderReportPdf, reportPdfFilename, type ReportPdfInput } from '../report-pdf.js';
 
 const READER_ROLES = ['radiologist', 'reviewer'];
@@ -1107,11 +1108,21 @@ export function reportsRouter(db: Db): Router {
     if (!row) return res.status(404).json({ ok: false, error: 'not_found' });
     if (row.authorUserId !== p.userId) return res.status(403).json({ ok: false, error: 'not_the_author' });
 
+    const idemKey = req.headers['idempotency-key'] as string | undefined ?? null;
+    const cached = await checkIdempotency(db, idemKey, 'report.sign', id);
+    if (cached) return res.status(cached.status).json(cached.body);
+
     const decision = signDecision({ state: row.state, sections: row.sections });
-    if (!decision.ok) return res.status(422).json({ ok: false, error: decision.reason });
+    if (!decision.ok) {
+      await storeIdempotency(db, idemKey, 'report.sign', id, 422, { ok: false, error: decision.reason });
+      return res.status(422).json({ ok: false, error: decision.reason });
+    }
 
     const me = await profileOf(p.userId);
-    if (!me) return res.status(409).json({ ok: false, error: 'no_clinician_profile' });
+    if (!me) {
+      await storeIdempotency(db, idemKey, 'report.sign', id, 409, { ok: false, error: 'no_clinician_profile' });
+      return res.status(409).json({ ok: false, error: 'no_clinician_profile' });
+    }
 
     const now = new Date();
     // Conditional on the state rather than read-then-write: two tabs on one draft must
@@ -1127,7 +1138,10 @@ export function reportsRouter(db: Db): Router {
       })
       .where(and(eq(reports.id, id), eq(reports.state, 'draft')))
       .returning({ id: reports.id });
-    if (!signed) return res.status(409).json({ ok: false, error: 'not_a_draft' });
+    if (!signed) {
+      await storeIdempotency(db, idemKey, 'report.sign', id, 409, { ok: false, error: 'not_a_draft' });
+      return res.status(409).json({ ok: false, error: 'not_a_draft' });
+    }
 
     // The clock stops here, not at countersignature: the contract term with a center is the
     // time to a *signed* report. `dueStages` reads exactly this column, so writing it is
@@ -1160,7 +1174,7 @@ export function reportsRouter(db: Db): Router {
         late: clock ? now.getTime() > clock.deadlineAt.getTime() : null,
       },
     });
-    return respond(res, p, id);
+    await respond(res, p, id);
   }));
 
   r.post('/reports/:id/countersign', ah(async (req: Ctx, res) => {
