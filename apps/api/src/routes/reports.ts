@@ -588,6 +588,8 @@ export function reportsRouter(db: Db): Router {
       patientMrn: patients.mrn,
       referringName: orders.referringName,
       tenantCode: tenants.code,
+      actionNeeded: reports.actionNeeded,
+      actionNeededMessage: reports.actionNeededMessage,
     }).from(reports)
       .innerJoin(studies, eq(studies.id, reports.studyId))
       .leftJoin(orders, eq(orders.id, studies.orderId))
@@ -625,6 +627,8 @@ export function reportsRouter(db: Db): Router {
           requiresReviewer: row.requiresReviewer ?? false,
           hasReviewer: row.reviewerUserId !== null,
         }),
+        actionNeeded: row.actionNeeded,
+        actionNeededMessage: row.actionNeededMessage,
       };
     });
 

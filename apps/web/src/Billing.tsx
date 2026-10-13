@@ -191,7 +191,7 @@ export function Billing({ tenantId }: { tenantId: number }) {
             <tfoot>
               <tr>
                 <td colSpan={4}><strong>Total</strong></td>
-                <td><strong>{formatRupees(preview.totalPaise)}</strong></td>
+                <td><strong>{formatRupees(preview.totals.totalPaise)}</strong></td>
               </tr>
             </tfoot>
           </table>

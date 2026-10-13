@@ -23,6 +23,10 @@ import { SlaTargets } from './SlaTargets';
 import { Retention } from './Retention';
 import { FilmExports } from './FilmExports';
 import { AuditBoard } from './AuditBoard';
+import { SearchReports } from './SearchReports';
+import { Sites } from './Sites';
+import { Orphans } from './Orphans';
+import { Tariffs } from './Tariffs';
 import { explainCode, retryLabel } from './Report';
 
 const HEARTBEAT_MS = 20_000;
@@ -520,6 +524,14 @@ function AwaitingDelivery({ show, canOpen, onOpen }: {
               }}>Flag</button>
               <button onClick={() => { setActionMsgFor(null); setActionMsg(''); }}>Cancel</button>
             </span>
+          ) : r.actionNeeded ? (
+            <span className="acts">
+              <span className="state amber">action needed{r.actionNeededMessage ? `: ${r.actionNeededMessage}` : ''}</span>
+              <button onClick={async () => {
+                await api.clearActionNeeded(r.reportId);
+                await load();
+              }}>Clear</button>
+            </span>
           ) : (
             <button onClick={() => { setActionMsgFor(r.reportId); setActionMsg(''); }}>Action needed</button>
           )}
@@ -964,6 +976,7 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [openStudy, setOpenStudy] = useState<number | null>(null);
   const [showTotpSettings, setShowTotpSettings] = useState(false);
+  const [nav, setNav] = useState('dashboard');
 
   const isReader = session !== null && READER_ROLES.includes(session.user.role);
   const isDesk = session !== null && DESK_ROLES.includes(session.user.role);
@@ -1050,117 +1063,213 @@ export default function App() {
 
   const counts = data?.counts ?? { green: 0, amber: 0, red: 0 };
 
+  // Build navigation items based on role
+  type NavItem = { id: string; label: string; badge?: number };
+  const navItems: NavItem[] = [];
+  navItems.push({ id: 'dashboard', label: 'Dashboard' });
+  if (isReader) {
+    navItems.push({ id: 'worklist', label: 'My Cases' });
+    navItems.push({ id: 'reports', label: 'Reports' });
+  }
+  if (isDesk) {
+    navItems.push({ id: 'delivery', label: 'Delivery' });
+    navItems.push({ id: 'criticals', label: 'Criticals' });
+    navItems.push({ id: 'notices', label: 'Notices' });
+  }
+  navItems.push({ id: 'search', label: 'Search' });
+  if (isOperator) {
+    navItems.push({ id: 'operations', label: 'Operations' });
+    navItems.push({ id: 'admin', label: 'Admin' });
+  }
+
   return (
-    <>
-      <header className="bar">
-        <h1>On panel</h1>
-        <span className="when">
-          {data ? `updated ${new Date(data.generatedAt).toLocaleTimeString()}` : 'no data yet'}
-          {feedError && ' · feed lost'}
-        </span>
-        <div className="counts">
-          <span className="count green">{counts.green} routable</span>
-          <span className="count amber">{counts.amber} not routable</span>
-          <span className="count red">{counts.red} off</span>
+    <div className="app-layout">
+      <aside className="sidebar">
+        <div className="sidebar-header">
+          <h1>telrad</h1>
+          <div className="user-info">
+            {session.user.name ?? 'User'} · {session.user.role}
+          </div>
         </div>
-        {isOwner && (
-          <button
-            onClick={() => setShowTotpSettings(true)}
-            style={{ marginLeft: 'auto', fontSize: '0.9em' }}
+        <nav className="sidebar-nav">
+          {navItems.map((item) => (
+            <div
+              key={item.id}
+              className={`sidebar-nav-item ${nav === item.id ? 'active' : ''}`}
+              onClick={() => setNav(item.id)}
+            >
+              {item.label}
+              {item.badge !== undefined && item.badge > 0 && (
+                <span className="badge">{item.badge}</span>
+              )}
+            </div>
+          ))}
+        </nav>
+        <div style={{ padding: '16px 20px', borderTop: '1px solid rgba(255,255,255,0.1)', marginTop: 'auto' }}>
+          {isOwner && (
+            <div
+              className="sidebar-nav-item"
+              onClick={() => setShowTotpSettings(true)}
+              style={{ padding: '8px 0', border: 'none' }}
+            >
+              Security Settings
+            </div>
+          )}
+          <div
+            className="sidebar-nav-item"
+            onClick={async () => {
+              try { await api.logout(); } catch { /* clear local state anyway */ }
+              setSession(null);
+            }}
+            style={{ padding: '8px 0', border: 'none' }}
           >
-            🔒 Security
-          </button>
-        )}
-      </header>
-
-      {showTotpSettings && <TotpSettings onClose={() => setShowTotpSettings(false)} />}
-
-      <main>
-        {feedError && (
-          <div className="banner">
-            The board cannot reach the server ({feedError}). Colours below are from the last
-            successful read and may already be wrong.
+            Sign out
           </div>
-        )}
-
-        {isReader && mine && (
-          <div className="card me">
-            <span className={`dot ${mine.color}`} />
-            <span className="who">{session.user.name ?? 'You'} — {mine.label}</span>
-            <span className="why">
-              {mine.openCases} of {mine.maxQueueSize} slots held. This page keeps you on the panel
-              while it is open; closing it takes you off within about ninety seconds.
-            </span>
-            <span style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
-              <button disabled={busy} onClick={() => void declare('receiving')}>Take cases</button>
-              <button disabled={busy} onClick={() => void declare('paused')}>Pause</button>
-              <button disabled={busy} onClick={() => void declare('away')}>Step away</button>
-              <button disabled={busy} onClick={() => void declare('offline')}>Sign off panel</button>
-            </span>
-          </div>
-        )}
-
-        {isReader && <Worklist onChanged={() => { void refresh(); }} onOpen={setOpenStudy} />}
-
-        {isReader && <ReviewQueue show onOpen={setOpenStudy} />}
-
-        {isReader && <MyReports show onOpen={setOpenStudy} />}
-
-        {isDesk && <CriticalBoard show={isDesk} canOpen={isOperator} onOpen={setOpenStudy} />}
-
-        {isDesk && <AwaitingDelivery show={isDesk} canOpen={isOperator} onOpen={setOpenStudy} />}
-
-        {isDesk && <NoticeQueue show={isDesk} canOpen={isOperator} onOpen={setOpenStudy} />}
-
-        {isOperator && <Waiting show={isOperator} panel={rows} onOpen={setOpenStudy} />}
-
-        {isOperator && <Performance show={isOperator} />}
-
-        {isOperator && <SlaTargets show={isOperator} tenantId={session.user.tenantId} />}
-        {isOperator && <Retention show={isOperator} canEdit={session.user.role === 'owner'} />}
-
-        {isOperator && <FilmExports show={isOperator} canOpen={isOperator} onOpen={setOpenStudy} />}
-
-        {isOperator && <AuditBoard show={isOperator} />}
-
-        {isOperator && session.user.tenantId !== null && <Billing tenantId={session.user.tenantId} />}
-
-        {counts.green === 0 && !feedError && (
-          <div className="banner">Nobody is routable right now. Anything waiting will wait.</div>
-        )}
-
-        <div className="filters">
-          <input type="search" placeholder="name or sub-specialty" value={query} onChange={(e) => setQuery(e.target.value)} />
-          <select value={modality} onChange={(e) => setModality(e.target.value)}>
-            <option value="">Any modality</option>
-            {modalities.map((m) => <option key={m} value={m}>{m}</option>)}
-          </select>
-          <label>
-            <input type="checkbox" checked={routableOnly} onChange={(e) => setRoutableOnly(e.target.checked)} />
-            routable only
-          </label>
-          <button onClick={() => void refresh()}>Refresh</button>
         </div>
+      </aside>
 
-        <table>
-          <thead>
-            <tr>
-              <th>Reader</th><th>Status</th><th>Queue</th>
-              <th className="hide-sm">Reads</th><th className="hide-sm">Roster</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map((row) => <Row key={row.userId} row={row} me={row.userId === session.user.id} />)}
-            {filtered.length === 0 && (
-              <tr><td colSpan={5} className="sub">
-                {rows.length === 0
-                  ? 'No clinician has a profile yet. A user needs a clinician profile to appear here.'
-                  : 'Nobody matches this filter.'}
-              </td></tr>
-            )}
-          </tbody>
-        </table>
-      </main>
-    </>
+      <div className="main-content">
+        <header className="bar">
+          <h1>{navItems.find((n) => n.id === nav)?.label ?? 'Dashboard'}</h1>
+          <span className="when">
+            {data ? `updated ${new Date(data.generatedAt).toLocaleTimeString()}` : 'no data yet'}
+            {feedError && ' · feed lost'}
+          </span>
+          <div className="counts">
+            <span className="count green">{counts.green} routable</span>
+            <span className="count amber">{counts.amber} not routable</span>
+            <span className="count red">{counts.red} off</span>
+          </div>
+        </header>
+
+        {showTotpSettings && <TotpSettings onClose={() => setShowTotpSettings(false)} />}
+
+        <main>
+          {feedError && (
+            <div className="banner">
+              The board cannot reach the server ({feedError}). Colours below are from the last
+              successful read and may already be wrong.
+            </div>
+          )}
+
+          {/* Dashboard: panel overview + presence */}
+          {nav === 'dashboard' && (
+            <>
+              {isReader && mine && (
+                <div className="card me">
+                  <span className={`dot ${mine.color}`} />
+                  <span className="who">{session.user.name ?? 'You'} — {mine.label}</span>
+                  <span className="why">
+                    {mine.openCases} of {mine.maxQueueSize} slots held.
+                  </span>
+                  <span style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+                    <button disabled={busy} onClick={() => void declare('receiving')}>Take cases</button>
+                    <button disabled={busy} onClick={() => void declare('paused')}>Pause</button>
+                    <button disabled={busy} onClick={() => void declare('away')}>Step away</button>
+                    <button disabled={busy} onClick={() => void declare('offline')}>Sign off panel</button>
+                  </span>
+                </div>
+              )}
+
+              {counts.green === 0 && !feedError && (
+                <div className="banner">Nobody is routable right now. Anything waiting will wait.</div>
+              )}
+
+              <div className="card">
+                <h2>Reader panel</h2>
+                <div className="filters">
+                  <input type="search" placeholder="name or sub-specialty" value={query} onChange={(e) => setQuery(e.target.value)} />
+                  <select value={modality} onChange={(e) => setModality(e.target.value)}>
+                    <option value="">Any modality</option>
+                    {modalities.map((m) => <option key={m} value={m}>{m}</option>)}
+                  </select>
+                  <label>
+                    <input type="checkbox" checked={routableOnly} onChange={(e) => setRoutableOnly(e.target.checked)} />
+                    routable only
+                  </label>
+                  <button onClick={() => void refresh()}>Refresh</button>
+                </div>
+
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Reader</th><th>Status</th><th>Queue</th>
+                      <th className="hide-sm">Reads</th><th className="hide-sm">Roster</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filtered.map((row) => <Row key={row.userId} row={row} me={row.userId === session.user.id} />)}
+                    {filtered.length === 0 && (
+                      <tr><td colSpan={5} className="sub">
+                        {rows.length === 0
+                          ? 'No clinician has a profile yet. A user needs a clinician profile to appear here.'
+                          : 'Nobody matches this filter.'}
+                      </td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+
+          {/* Worklist: reader's cases */}
+          {nav === 'worklist' && isReader && (
+            <>
+              <Worklist onChanged={() => { void refresh(); }} onOpen={setOpenStudy} />
+              <ReviewQueue show onOpen={setOpenStudy} />
+              <MyReports show onOpen={setOpenStudy} />
+            </>
+          )}
+
+          {/* Reports: review queue + my reports (for readers who land here) */}
+          {nav === 'reports' && isReader && (
+            <>
+              <ReviewQueue show onOpen={setOpenStudy} />
+              <MyReports show onOpen={setOpenStudy} />
+            </>
+          )}
+
+          {/* Delivery desk */}
+          {nav === 'delivery' && isDesk && (
+            <AwaitingDelivery show canOpen={isOperator} onOpen={setOpenStudy} />
+          )}
+
+          {nav === 'criticals' && isDesk && (
+            <CriticalBoard show canOpen={isOperator} onOpen={setOpenStudy} />
+          )}
+
+          {nav === 'notices' && isDesk && (
+            <NoticeQueue show canOpen={isOperator} onOpen={setOpenStudy} />
+          )}
+
+          {/* Search: available to everyone */}
+          {nav === 'search' && (
+            <SearchReports tenantId={session.user.tenantId} onOpen={setOpenStudy} />
+          )}
+
+          {/* Operations: operator's working board */}
+          {nav === 'operations' && isOperator && (
+            <>
+              <Waiting show panel={rows} onOpen={setOpenStudy} />
+              <Orphans show onOpen={setOpenStudy} />
+              <Performance show />
+              <SlaTargets show tenantId={session.user.tenantId} />
+              <FilmExports show canOpen onOpen={setOpenStudy} />
+            </>
+          )}
+
+          {/* Admin: configuration */}
+          {nav === 'admin' && isOperator && (
+            <>
+              <Sites show />
+              <Tariffs show tenantId={session.user.tenantId} />
+              <Retention show canEdit={session.user.role === 'owner'} />
+              <AuditBoard show />
+              {session.user.tenantId !== null && <Billing tenantId={session.user.tenantId} />}
+            </>
+          )}
+        </main>
+      </div>
+    </div>
   );
 }

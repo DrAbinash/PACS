@@ -343,6 +343,8 @@ export type DeliveryItem = {
   reason: string | null;
   needsSecondName: boolean;
   openCriticals: number;
+  actionNeeded: boolean;
+  actionNeededMessage: string | null;
 };
 
 export type Invoice = {
@@ -389,14 +391,21 @@ export type PreviewLine = {
 
 export type PreviewResult = {
   ok: boolean;
-  periodStart: string;
-  periodEnd: string;
-  lines: PreviewLine[];
+  tenantId: number;
+  period: { from: string; to: string };
+  timezone: string;
+  taxPct: number;
+  deliveredStudies: number;
+  lines: (PreviewLine & { amountRupees: string; deliveredAt: string | null; tzOffsetMinutes: number })[];
   unpriced: { studyId: number; reason: string }[];
-  grossPaise: number;
-  taxPaise: number;
-  totalPaise: number;
-  totalRupees: string;
+  totals: {
+    grossPaise: number;
+    taxPaise: number;
+    totalPaise: number;
+    grossRupees: string;
+    taxRupees: string;
+    totalRupees: string;
+  };
 };
 
 export const api = {
@@ -527,11 +536,10 @@ export const api = {
     call<{ ok: boolean; invoices: Invoice[] }>(`/v1/billing/invoices?tenantId=${tenantId}`),
   invoice: (id: number) =>
     call<{ ok: boolean; invoice: Invoice; lines: InvoiceLine[] }>(`/v1/billing/invoices/${id}`),
-  previewBilling: (tenantId: number, periodStart: string, periodEnd: string) =>
-    call<PreviewResult>('/v1/billing/preview', {
-      method: 'POST',
-      body: JSON.stringify({ tenantId, periodStart, periodEnd }),
-    }),
+  previewBilling: (tenantId: number, periodStart: string, periodEnd: string) => {
+    const q = new URLSearchParams({ tenantId: String(tenantId), from: periodStart, to: periodEnd });
+    return call<PreviewResult>(`/v1/billing/preview?${q}`);
+  },
   createInvoice: (tenantId: number, periodStart: string, periodEnd: string) =>
     call<{ ok: boolean; invoice: Invoice; lines: InvoiceLine[] }>('/v1/billing/invoices', {
       method: 'POST',
@@ -616,6 +624,87 @@ export const api = {
     call<{ ok: boolean; entries: AuditEntry[] }>('/v1/audit/latest'),
   auditExportHref: (format: 'csv' | 'json') =>
     `/v1/audit/export?format=${format}`,
+
+  // Report search: full-text across signed reports.
+  searchReports: (query: string, tenantId?: number) => {
+    const q = new URLSearchParams({ q: query });
+    if (tenantId) q.set('tenantId', String(tenantId));
+    return call<{ ok: boolean; results: SearchResultItem[] }>(`/v1/reports/search?${q}`);
+  },
+
+  // Sites: imaging centres that send studies via the upload agent.
+  sites: () =>
+    call<{ ok: boolean; sites: Site[] }>('/v1/sites'),
+  createSite: (input: { name: string; aeTitle?: string; cidrs?: string[] }) =>
+    call<{ ok: boolean; site: Site }>('/v1/sites', { method: 'POST', body: JSON.stringify(input) }),
+  siteTokens: (siteId: number) =>
+    call<{ ok: boolean; tokens: SiteToken[] }>(`/v1/sites/${siteId}/tokens`),
+  issueSiteToken: (siteId: number, label?: string) =>
+    call<{ ok: boolean; token: SiteToken }>('/v1/sites/:id/tokens'.replace(':id', String(siteId)), {
+      method: 'POST', body: JSON.stringify({ label: label ?? null }),
+    }),
+  revokeToken: (tokenId: number) =>
+    call<{ ok: boolean }>(`/v1/tokens/${tokenId}/revoke`, { method: 'POST', body: '{}' }),
+
+  // Orphans: studies that arrived without a matching order.
+  orphans: () =>
+    call<{ ok: boolean; orphans: OrphanStudy[] }>('/v1/orphans'),
+  linkStudy: (studyId: number, orderId: number) =>
+    call<{ ok: boolean }>(`/v1/studies/${studyId}/link`, { method: 'POST', body: JSON.stringify({ orderId }) }),
+  unlinkStudy: (studyId: number) =>
+    call<{ ok: boolean }>(`/v1/studies/${studyId}/unlink`, { method: 'POST', body: '{}' }),
+
+  // Tariffs: the price list that billing uses to price studies.
+  tariffs: (tenantId: number) =>
+    call<{ ok: boolean; tariffs: Tariff[] }>(`/v1/billing/tariffs?tenantId=${tenantId}`),
+  createTariff: (input: { tenantId: number; code: string; label: string; unitPaise: number; modalityCode?: string; nightMultiplier?: number }) =>
+    call<{ ok: boolean; tariff: Tariff }>('/v1/billing/tariffs', { method: 'POST', body: JSON.stringify(input) }),
+  activateTariff: (id: number) =>
+    call<{ ok: boolean }>(`/v1/billing/tariffs/${id}/activate`, { method: 'POST', body: '{}' }),
+  retireTariff: (id: number) =>
+    call<{ ok: boolean }>(`/v1/billing/tariffs/${id}/retire`, { method: 'POST', body: '{}' }),
+
+  // QC indicators: NHC quality metrics.
+  qcIndicators: (from?: string, to?: string) => {
+    const q = new URLSearchParams();
+    if (from) q.set('from', from);
+    if (to) q.set('to', to);
+    const qs = q.toString();
+    return call<{ ok: boolean; indicators: QcIndicators }>(`/v1/qc/indicators${qs ? `?${qs}` : ''}`);
+  },
+
+  // Invoice dispute: flag an issued invoice as contested.
+  disputeInvoice: (id: number, reason: string) =>
+    call<{ ok: boolean }>(`/v1/billing/invoices/${id}/dispute`, {
+      method: 'POST', body: JSON.stringify({ reason }),
+    }),
+
+  // Tax rate: configure the tax percentage for a tenant.
+  setTaxRate: (tenantId: number, taxPct: number) =>
+    call<{ ok: boolean; tenantId: number; taxPct: number }>('/v1/billing/tax-rate', {
+      method: 'POST', body: JSON.stringify({ tenantId, taxPct }),
+    }),
+
+  // Patients: register and search.
+  patients: (query?: string) => {
+    const q = query ? new URLSearchParams({ q: query }) : null;
+    return call<{ ok: boolean; patients: Patient[] }>(`/v1/patients${q ? `?${q}` : ''}`);
+  },
+  createPatient: (input: { mrn: string; fullName: string; gender?: string; dob?: string; phone?: string; email?: string }) =>
+    call<{ ok: boolean; patient: Patient }>('/v1/patients', { method: 'POST', body: JSON.stringify(input) }),
+
+  // Orders: create and manage radiology orders.
+  orders: (filters?: { status?: string; patientId?: number }) => {
+    const q = new URLSearchParams();
+    if (filters?.status) q.set('status', filters.status);
+    if (filters?.patientId) q.set('patientId', String(filters.patientId));
+    const qs = q.toString();
+    return call<{ ok: boolean; orders: Order[] }>(`/v1/orders${qs ? `?${qs}` : ''}`);
+  },
+  createOrder: (input: { patientId: number; modalityCode: string; priority?: string; clinicalIndication?: string; referringName?: string; referringEmail?: string }) =>
+    call<{ ok: boolean; order: Order }>('/v1/orders', { method: 'POST', body: JSON.stringify(input) }),
+  updateOrder: (id: number, fields: { priority?: string; status?: string; clinicalIndication?: string; referringEmail?: string }) =>
+    call<{ ok: boolean; order: Order }>(`/v1/orders/${id}`, { method: 'PATCH', body: JSON.stringify(fields) }),
 };
 
 export type ReaderPerf = {
@@ -678,6 +767,102 @@ export type FrameBytes = {
   // frame is a finished image the node stored but cannot decode.
   format: 'int16-le' | 'jpeg';
   bytes: ArrayBuffer;
+};
+
+export type SearchResultItem = {
+  reportId: number;
+  studyId: number;
+  version: number;
+  state: ReportState;
+  accession: string | null;
+  modality: string | null;
+  patientName: string | null;
+  signedAt: string | null;
+  authorName: string;
+  tenantCode: string | null;
+  snippet: string | null;
+};
+
+export type Site = {
+  id: number;
+  tenantId: number;
+  name: string;
+  aeTitle: string | null;
+  cidrs: string[] | null;
+  createdAt: string;
+};
+
+export type SiteToken = {
+  id: number;
+  siteId: number;
+  label: string | null;
+  createdAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+  expiresAt: string | null;
+};
+
+export type OrphanStudy = {
+  studyId: number;
+  accession: string | null;
+  modality: string | null;
+  studyDate: string | null;
+  receivedAt: string;
+  patientName: string | null;
+  tenantCode: string | null;
+  candidates: { orderId: number; patientName: string | null; modalityCode: string | null; priority: string | null }[];
+};
+
+export type Tariff = {
+  id: number;
+  tenantId: number;
+  code: string;
+  label: string;
+  unitPaise: number;
+  unitRupees: string;
+  modalityCode: string | null;
+  nightMultiplier: number | null;
+  status: 'active' | 'retired';
+  effectiveFrom: string;
+  effectiveTo: string | null;
+};
+
+export type QcIndicators = {
+  period: { from: string; to: string };
+  totalStudies: number;
+  artifactRate: number;
+  emergencyCompliance: number;
+  criticalCompliance: number;
+  avgTurnaroundMinutes: number;
+  rejectionRate: number;
+};
+
+export type Patient = {
+  id: number;
+  tenantId: number;
+  mrn: string;
+  fullName: string;
+  gender: string | null;
+  dob: string | null;
+  phone: string | null;
+  email: string | null;
+  createdAt: string;
+};
+
+export type Order = {
+  id: number;
+  tenantId: number;
+  patientId: number;
+  patientName: string;
+  modalityCode: string;
+  priority: string;
+  status: string;
+  clinicalIndication: string | null;
+  referringName: string | null;
+  referringEmail: string | null;
+  studyId: number | null;
+  createdAt: string;
+  updatedAt: string;
 };
 
 async function frame(studyId: number, pk: string, index: number): Promise<FrameBytes> {
