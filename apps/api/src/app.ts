@@ -259,13 +259,23 @@ export function createApp(deps: AppDeps): Express {
     if (!Number.isInteger(id)) return res.status(400).json({ ok: false, error: 'bad_id' });
     const rows = await db.select().from(studies).where(eq(studies.id, id)).limit(1);
     const row = rows[0];
-    if (!row) return res.status(404).json({ ok: false, error: 'not_found' });
     const tenantId = scopeTenant(req.principal!);
+    // Constant-time response: a cross-tenant lookup and a non-existent row both return 404,
+    // but the cross-tenant path writes an audit row first, making it measurably slower. An
+    // attacker who can measure response times can enumerate which study IDs exist in other
+    // tenants. A fixed delay masks the difference. 50ms is enough to cover the audit write
+    // latency without being noticeable to a legitimate user.
+    const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    if (!row) {
+      await delay(50);
+      return res.status(404).json({ ok: false, error: 'not_found' });
+    }
     if (tenantId !== null && row.tenantId !== tenantId) {
       await appendAudit(db, {
         actorUserId: req.principal!.userId, actorKind: 'human', tenantId: row.tenantId,
         action: 'studies.denied_cross_tenant', entity: 'studies', entityId: String(id),
       });
+      await delay(50);
       // 404, not 403: a center must not learn that some other center's id exists.
       return res.status(404).json({ ok: false, error: 'not_found' });
     }

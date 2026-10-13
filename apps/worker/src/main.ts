@@ -1,4 +1,5 @@
-import { openDb } from '@telrad/db';
+import { openDbWithRetry } from '@telrad/db';
+import { sql } from 'drizzle-orm';
 import { autoEscalateOnce } from './auto-escalate.js';
 import { criticalSweepOnce } from './criticals.js';
 import { dispatchSweep } from './dispatch.js';
@@ -28,7 +29,8 @@ const poolMax = poolMaxRaw ? Number(poolMaxRaw) : undefined;
 if (poolMax !== undefined && (!Number.isInteger(poolMax) || poolMax < 1)) {
   throw new Error('TR_DB_POOL_MAX must be a positive integer');
 }
-const handle = openDb(env('TR_DB_URL'), { max: poolMax });
+// Retry with backoff so the worker survives a cold-boot race with the db container.
+const handle = await openDbWithRetry(env('TR_DB_URL'), { max: poolMax });
 
 const orthanc = createOrthancReader({
   baseUrl: env('TR_ORTHANC_URL'),
@@ -190,10 +192,18 @@ async function sweep(): Promise<void> {
 
 async function tick(): Promise<void> {
   if (stopping || ticking) return;
+  // A distributed lock so two workers cannot run concurrently. The ingest cursor and the
+  // escalation ladder are not idempotent: a second worker would double-advance the cursor
+  // and re-fire stages. pg_try_advisory_lock is session-scoped and auto-releases on disconnect,
+  // so a dead worker's lock dies with its connection — no stale lock to clean up.
+  const lockResult = await handle.db.execute<{ acquired: boolean }>(
+    sql`select pg_try_advisory_lock(1) as acquired`
+  );
+  if (!lockResult[0]?.acquired) {
+    // Another worker holds the lock. This tick is skipped; the next interval will retry.
+    return;
+  }
   ticking = true;
-  // Two stages, two labels. A sweep that fails is a routing outage, not an ingest
-  // outage, and a single catch-all log line that says `ingest failed` for both is how
-  // an operator ends up debugging the wrong subsystem at 2 a.m.
   try {
     // Drain first: a file uploaded a second ago should not wait on the poll that
     // has to see it for the study to appear.
@@ -271,6 +281,10 @@ async function tick(): Promise<void> {
   } catch (err) {
     console.error('dispatch failed', err instanceof Error ? err.message : err);
   } finally {
+    // Release the advisory lock so the next tick (this worker or another) can acquire it.
+    // pg_advisory_unlock returns false if the lock was not held, which should never happen
+    // here — but if it does, the next tick will simply acquire it fresh.
+    await handle.db.execute(sql`select pg_advisory_unlock(1)`);
     ticking = false;
   }
 

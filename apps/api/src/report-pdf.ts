@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto';
+import { readFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { PDFDocument, StandardFonts, rgb, type PDFPageDrawTextOptions } from 'pdf-lib';
+import fontkit from '@pdf-lib/fontkit';
 
 // The delivered record. A signed report is a row of jsonb in our database; what the
 // referring clinic keeps is this document, and it has to stand on its own without a
@@ -138,8 +141,42 @@ export async function renderReportPdf(source: ReportPdfInput): Promise<{
 }> {
   const input = sanitize(source);
   const doc = await PDFDocument.create();
-  const font = await doc.embedFont(StandardFonts.Helvetica);
-  const bold = await doc.embedFont(StandardFonts.HelveticaBold);
+  // Register fontkit so we can embed Unicode TTF fonts. Devanagari, Chinese, and other
+  // non-Latin scripts are common in Indian radiology deployments; a patient name that
+  // renders as `?` on a signed report is a clinical correctness bug, not a cosmetic one.
+  doc.registerFontkit(fontkit);
+
+  // Try to load Unicode fonts from a configurable directory. The operator places
+  // NotoSans-Regular.ttf and NotoSans-Bold.ttf in TR_FONTS_DIR; if they're not present,
+  // we fall back to Helvetica (which is what we did before fontkit). The fallback keeps
+  // the printable() sanitization in effect, so non-encodable characters still arrive as
+  // `?` rather than throwing.
+  const fontsDir = process.env.TR_FONTS_DIR;
+  let font, bold;
+  if (fontsDir) {
+    const regularPath = join(fontsDir, 'NotoSans-Regular.ttf');
+    const boldPath = join(fontsDir, 'NotoSans-Bold.ttf');
+    if (existsSync(regularPath) && existsSync(boldPath)) {
+      try {
+        const regularBytes = readFileSync(regularPath);
+        const boldBytes = readFileSync(boldPath);
+        font = await doc.embedFont(regularBytes);
+        bold = await doc.embedFont(boldBytes);
+      } catch {
+        // Font loading failed (corrupt file, wrong format, etc.). Fall back to Helvetica.
+        font = await doc.embedFont(StandardFonts.Helvetica);
+        bold = await doc.embedFont(StandardFonts.HelveticaBold);
+      }
+    } else {
+      // Fonts not present. Fall back to Helvetica.
+      font = await doc.embedFont(StandardFonts.Helvetica);
+      bold = await doc.embedFont(StandardFonts.HelveticaBold);
+    }
+  } else {
+    // No fonts directory configured. Fall back to Helvetica.
+    font = await doc.embedFont(StandardFonts.Helvetica);
+    bold = await doc.embedFont(StandardFonts.HelveticaBold);
+  }
   const contentWidth = PAGE.width - MARGIN * 2;
 
   // Pinned to the signature so re-rendering the same report years later produces the

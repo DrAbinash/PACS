@@ -13,6 +13,7 @@
     "typecheck:test": "tsc -p tsconfig.test.json"
   },
   "dependencies": {
+    "@pdf-lib/fontkit": "^1.1.1",
     "@telrad/db": "workspace:*",
     "@telrad/shared": "workspace:*",
     "drizzle-orm": "^0.38.3",

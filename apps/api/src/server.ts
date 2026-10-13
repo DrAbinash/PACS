@@ -1,6 +1,6 @@
 import {
   assertMigrated,
-  openDb,
+  openDbWithRetry,
 } from '@telrad/db';
 import { createApp } from './app.js';
 import { loadEnv } from './env.js';
@@ -8,7 +8,8 @@ import { createOrthancClient } from './orthanc.js';
 
 const env = loadEnv();
 const version = process.env.TR_RELEASE ?? 'dev';
-const handle = openDb(env.dbUrl, { max: env.dbPoolMax });
+// Retry with backoff so the api survives a cold-boot race with the db container.
+const handle = await openDbWithRetry(env.dbUrl, { max: env.dbPoolMax });
 
 // Fail fast, before the port is bound. A service that answers /health/live while
 // its own schema is missing is worse than one that refuses to start.
