@@ -15,6 +15,7 @@ import { opsDigestOnce } from './ops.js';
 import { createSmtpTransport } from './smtp.js';
 import { createWhatsAppTransport } from './whatsapp.js';
 import { createCriticalStore, createDispatchStore, createEscalationStore, createInboxStore, createNotifyStore, createOpsStore, createStore } from './store.js';
+import { logger, childLogger } from './logger.js';
 
 function env(name: string): string {
   const v = process.env[name];
@@ -178,15 +179,22 @@ async function retentionSweep(): Promise<void> {
 
 async function sweep(): Promise<void> {
   const d = await dispatchSweep(dispatch);
-  if (d.widened > 0) console.log(`dispatch widened=${d.widened} (offers to at-capacity readers under a live widen_pool stage)`);
-  if (d.exhausted > 0) console.log(`dispatch exhausted=${d.exhausted} (offer ladder ended; operator action needed)`);
+  // Structured logging: the operator's log aggregator can query `offered > 0` or
+  // `exhausted > 0` directly, without parsing strings. The unassigned array is logged
+  // as a structured field so a dashboard can show which studies are stuck and why.
+  if (d.widened > 0) logger.info({ widened: d.widened }, 'dispatch widened');
+  if (d.exhausted > 0) logger.info({ exhausted: d.exhausted }, 'dispatch exhausted');
   if (d.expired > 0 || d.offered > 0 || d.unassigned.length > 0) {
-    console.log(`dispatch offered=${d.offered} expired=${d.expired} unassigned=${d.unassigned.length}`
-      + (d.unassigned.length > 0
-        // The gap is printed, not swallowed: an operator reading a log at 2 a.m.
-        // needs "who was missed and why", which is the same content the console shows.
-        ? ` nearest=[${d.unassigned.slice(0, 3).map((u) => `${u.studyId}:${u.reason}${u.gap ? `/${u.gap.missing.join('+')}` : ''}`).join(' ')}]`
-        : ''));
+    logger.info({
+      offered: d.offered,
+      expired: d.expired,
+      unassigned_count: d.unassigned.length,
+      unassigned: d.unassigned.slice(0, 3).map((u) => ({
+        studyId: u.studyId,
+        reason: u.reason,
+        gap: u.gap?.missing.join('+') ?? null,
+      })),
+    }, 'dispatch tick');
   }
 }
 
@@ -215,14 +223,28 @@ async function tick(): Promise<void> {
     }
     const r = await pollOnce(orthanc, store, { nodeId });
     if (r.seen > 0) {
-      console.log(`ingest node=${nodeId} seen=${r.seen} created=${r.created} updated=${r.updated} `
-        + `orphans=${r.orphans} ambiguous=${r.ambiguous} unresolved_site=${r.unresolvedSite} `
-        + `incomplete=${r.incomplete} sla_opened=${r.slaOpened}`);
+      // Structured fields for log aggregation: a dashboard can plot created/orphans/ambiguous
+      // over time without parsing strings.
+      logger.info({
+        node: nodeId,
+        seen: r.seen,
+        created: r.created,
+        updated: r.updated,
+        orphans: r.orphans,
+        ambiguous: r.ambiguous,
+        unresolved_site: r.unresolvedSite,
+        incomplete: r.incomplete,
+        sla_opened: r.slaOpened,
+      }, 'ingest poll');
     }
     const settled = await recheckStalled(orthanc, store, { nodeId });
     if (settled.seen > 0) {
-      console.log(`settle node=${nodeId} rechecked=${settled.seen} completed=${settled.completed} `
-        + `clocks_opened=${settled.clocks}`);
+      logger.info({
+        node: nodeId,
+        rechecked: settled.seen,
+        completed: settled.completed,
+        clocks_opened: settled.clocks,
+      }, 'ingest settle');
     }
   } catch (err) {
     // The cursor row carries the failure text so the console can show a center that
@@ -295,11 +317,18 @@ async function tick(): Promise<void> {
   }
 }
 
-console.log(`telrad worker starting node=${nodeId} poll=${pollSeconds}s mode=${process.argv[2] ?? 'loop'} `
-  + `mail=${smtp.configured ? `smtp via ${smtp.label}` : 'not configured (queued notifications will wait)'} `
-  + `ops=${opsEmail ? `digest to ${opsEmail} every ${opsDigestMinutes}m` : 'not configured (alerts stay audit-only)'} `
-  + `retention=sweep every ${retentionSweepMinutes}m `
-  + `wa=${whatsapp.configured ? whatsapp.label : 'not configured (whatsapp rows will wait)'}`);
+// Structured startup log: the operator's log aggregator can query `node=node-nas-01`
+// to find all logs from this worker instance, and `mode=loop` vs `mode=once` distinguishes
+// long-running workers from verification runs.
+logger.info({
+  node: nodeId,
+  poll_seconds: pollSeconds,
+  mode: process.argv[2] ?? 'loop',
+  mail: smtp.configured ? smtp.label : 'not_configured',
+  ops: opsEmail ? `digest_to_${opsEmail}_every_${opsDigestMinutes}m` : 'not_configured',
+  retention_minutes: retentionSweepMinutes,
+  whatsapp: whatsapp.configured ? whatsapp.label : 'not_configured',
+}, 'telrad worker starting');
 
 if (process.argv[2] === 'dispatch-once') {
   // The routing half of a tick with no ingest beside it: the critical clocks, then
