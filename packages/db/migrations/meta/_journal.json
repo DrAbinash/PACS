@@ -43,6 +43,20 @@
       "when": 1791836045049,
       "tag": "0005_vengeful_skaar",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1791886202103,
+      "tag": "0006_idempotency_keys",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1791886202104,
+      "tag": "0007_totp",
+      "breakpoints": true
     }
   ]
 }

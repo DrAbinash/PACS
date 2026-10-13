@@ -92,6 +92,9 @@ export const users = telrad.table('users', {
   failedAttempts: smallint('failed_attempts').notNull().default(0),
   lockedUntil: timestamp('locked_until', { withTimezone: true, mode: 'date' }),
   lastLoginAt: timestamp('last_login_at', { withTimezone: true, mode: 'date' }),
+  totpSecret: text('totp_secret'),
+  totpEnabled: boolean('totp_enabled').notNull().default(false),
+  totpBackupCodes: jsonb('totp_backup_codes').$type<string[]>(),
   createdAt: at('created_at'),
 }, (t) => ({
   emailUq: uniqueIndex('users_email_uq').on(sql`lower(${t.email})`),

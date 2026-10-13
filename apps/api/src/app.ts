@@ -27,6 +27,7 @@ import { reportsRouter } from './routes/reports.js';
 import { sitesRouter } from './routes/sites.js';
 import { slaRouter } from './routes/sla.js';
 import { tenantsRouter } from './routes/tenants.js';
+import { totpRouter } from './routes/totp.js';
 import { uploadsRouter } from './routes/uploads.js';
 import { viewRouter } from './routes/view.js';
 import { worklistRouter } from './routes/worklist.js';
@@ -161,6 +162,35 @@ export function createApp(deps: AppDeps): Express {
 
       if (user.lockedUntil && user.lockedUntil.getTime() > Date.now()) {
         return res.status(423).json({ ok: false, error: 'account_locked' });
+      }
+
+      // TOTP gate: if the user has 2FA enabled, issue a temporary session that
+      // can only be exchanged for a real one via POST /auth/totp/complete. The
+      // temporary session is short-lived and cannot access any other endpoint.
+      if (user.totpEnabled) {
+        const tempToken = newToken();
+        const now = new Date();
+        // Temporary sessions expire in 2 minutes — enough time to type a code,
+        // not enough for an attacker to brute-force offline.
+        await db.insert(sessions).values({
+          id: newToken(8),
+          userId: user.id,
+          tokenHash: hashToken(tempToken),
+          createdAt: now,
+          expiresAt: new Date(now.getTime() + 2 * 60_000),
+          ip: req.ip,
+          userAgent: req.headers['user-agent']?.slice(0, 200) ?? null,
+        });
+        await appendAudit(db, {
+          actorUserId: user.id, actorKind: 'human', tenantId: user.tenantId,
+          action: 'auth.login_totp_required', entity: 'users', entityId: String(user.id),
+          detail: { role: user.role },
+        });
+        return res.json({
+          ok: true,
+          requiresTotp: true,
+          tempToken,
+        });
       }
 
       const token = newToken();
@@ -390,6 +420,7 @@ export function createApp(deps: AppDeps): Express {
   app.use('/v1', performanceRouter(db));
   app.use('/v1', slaRouter(db));
   app.use('/v1', tenantsRouter(db));
+  app.use('/v1', totpRouter(db, secureCookies));
   app.use(metricsRouter(db));
 
   // An unknown `/v1/...` path answers with JSON, not Express's HTML 404. Every other
