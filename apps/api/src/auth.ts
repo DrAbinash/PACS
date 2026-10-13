@@ -30,7 +30,7 @@ export function readCookie(req: Request, name: string): string | null {
 export async function loadPrincipal(db: Db, token: string): Promise<Principal | null> {
   const rows = await db.execute<{
     session_id: string; user_id: number; role: string; tenant_id: number | null;
-    expires_at: Date; created_at: Date;
+    expires_at: string; created_at: string;
   }>(sql`
     select s.id as session_id, u.id as user_id, u.role, u.tenant_id,
            s.expires_at, s.created_at
@@ -43,7 +43,8 @@ export async function loadPrincipal(db: Db, token: string): Promise<Principal | 
      limit 1`);
   const found = rows[0];
   if (!found) return null;
-  if (found.expires_at.getTime() - Date.now() < SESSION_SLIDE_MS) {
+  const expiresAt = new Date(found.expires_at);
+  if (expiresAt.getTime() - Date.now() < SESSION_SLIDE_MS) {
     await db.execute(sql`
       update telrad.sessions
          set expires_at = least(
