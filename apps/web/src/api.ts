@@ -613,6 +613,20 @@ export const api = {
       `/v1/tenants/${tenantId}/retention`,
       { method: 'PATCH', body: JSON.stringify({ retentionDays }) },
     ),
+  tenantProfile: (id?: number) => {
+    const q = id ? `?id=${id}` : '';
+    return call<{ ok: boolean; tenant?: TenantProfile; tenants?: TenantProfile[] }>(`/v1/tenants/profile${q}`);
+  },
+  updateTenantProfile: (fields: Partial<TenantProfile>) =>
+    call<{ ok: boolean; tenant: TenantProfile }>('/v1/tenants/profile', {
+      method: 'PATCH', body: JSON.stringify(fields),
+    }),
+
+  // Self-serve password change: requires the current password.
+  changePassword: (currentPassword: string, newPassword: string) =>
+    call<{ ok: boolean }>('/v1/users/me/password', {
+      method: 'POST', body: JSON.stringify({ currentPassword, newPassword }),
+    }),
 
   filmExports: () =>
     call<{ ok: boolean; exports: FilmExport[] }>('/v1/film/exports'),
@@ -751,6 +765,26 @@ export type RetentionRow = {
   code: string;
   legalName: string;
   retentionDays: number | null;
+};
+
+export type TenantProfile = {
+  id: number;
+  code: string;
+  legalName: string;
+  billingName: string | null;
+  country: string;
+  stateCode: string | null;
+  gstin: string | null;
+  timezone: string;
+  status: 'trial' | 'active' | 'suspended' | 'terminated';
+  agreementStartsOn: string | null;
+  agreementEndsOn: string | null;
+  contactName: string | null;
+  contactEmail: string | null;
+  contactPhone: string | null;
+  signatureLine: string | null;
+  retentionDays: number | null;
+  createdAt: string | null;
 };
 
 export type FilmExport = {

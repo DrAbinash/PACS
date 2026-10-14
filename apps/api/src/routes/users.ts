@@ -1,7 +1,7 @@
 import { eq, sql } from 'drizzle-orm';
 import type { Db } from '@telrad/db';
 import { appendAudit, clinicianProfiles, users } from '@telrad/db';
-import { hashPassword } from '@telrad/shared';
+import { hashPassword, verifyPassword } from '@telrad/shared';
 import { Router } from 'express';
 import { randomBytes } from 'node:crypto';
 import { requireAuth, requireRole, scopeTenant, type Ctx } from '../auth.js';
@@ -247,6 +247,52 @@ export function usersRouter(db: Db): Router {
     });
 
     res.json({ ok: true, tempPassword });
+  }));
+
+  // Self-serve password change. The current password must verify first — an
+  // unlocked browser on an operator's desk is the threat this guards against;
+  // without the check, anyone who sits at the keyboard for five seconds walks
+  // away with a new password on someone else's account.
+  r.post('/users/me/password', ah(async (req: Ctx, res) => {
+    if (!req.principal) return res.status(401).json({ ok: false, error: 'unauthenticated' });
+    const id = req.principal.userId;
+    const body = req.body ?? {};
+    const current = String(body.currentPassword ?? '');
+    const next = String(body.newPassword ?? '');
+    if (!current || !next) {
+      return res.status(422).json({ ok: false, error: 'currentPassword and newPassword are required' });
+    }
+    if (next.length < 14) {
+      return res.status(422).json({ ok: false, error: 'newPassword shorter than 14 characters' });
+    }
+    if (/^(changeme|password|1234)/i.test(next)) {
+      return res.status(422).json({ ok: false, error: 'newPassword is a known default' });
+    }
+
+    const [user] = await db.select().from(users).where(eq(users.id, id)).limit(1);
+    if (!user) return res.status(404).json({ ok: false, error: 'not_found' });
+    if (!user.passwordHash) {
+      return res.status(403).json({ ok: false, error: 'account has no password set' });
+    }
+    const ok = await verifyPassword(current, user.passwordHash);
+    if (!ok) {
+      return res.status(403).json({ ok: false, error: 'currentPassword is incorrect' });
+    }
+
+    await db.update(users).set({
+      passwordHash: await hashPassword(next),
+      passwordAlgo: 'scrypt',
+      failedAttempts: 0,
+      lockedUntil: null,
+    }).where(eq(users.id, id));
+
+    await appendAudit(db, {
+      actorUserId: id, actorKind: 'human', tenantId: req.principal.tenantId,
+      action: 'user.change_password', entity: 'users', entityId: String(id),
+      detail: {},
+    });
+
+    res.json({ ok: true });
   }));
 
   return r;

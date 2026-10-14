@@ -28,6 +28,7 @@ import { Sites } from './Sites';
 import { Orphans } from './Orphans';
 import { Tariffs } from './Tariffs';
 import { Users } from './Users';
+import { Settings } from './Settings';
 import { explainCode, retryLabel } from './Report';
 
 const HEARTBEAT_MS = 20_000;
@@ -1082,6 +1083,7 @@ export default function App() {
     navItems.push({ id: 'operations', label: 'Operations' });
     navItems.push({ id: 'admin', label: 'Admin' });
   }
+  navItems.push({ id: 'settings', label: 'Settings' });
 
   return (
     <div className="app-layout">
@@ -1269,6 +1271,10 @@ export default function App() {
               <AuditBoard show />
               {session.user.tenantId !== null && <Billing tenantId={session.user.tenantId} />}
             </>
+          )}
+
+          {nav === 'settings' && (
+            <Settings show session={session} />
           )}
         </main>
       </div>
