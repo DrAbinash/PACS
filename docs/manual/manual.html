@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>telrad — User Manual</title>
+<style>
+  @media print {
+    body { font-size: 11pt; }
+    .page-break { page-break-before: always; }
+    img { max-width: 100%; }
+    nav.toc { display: none; }
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    color: #1a1a2e;
+    background: #f8f9fa;
+    line-height: 1.6;
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 40px 24px;
+  }
+  h1 { font-size: 2.2em; color: #0d6efd; margin-bottom: 4px; }
+  h2 { font-size: 1.5em; color: #0d6efd; margin: 32px 0 12px; border-bottom: 2px solid #e9ecef; padding-bottom: 6px; }
+  h3 { font-size: 1.15em; color: #343a40; margin: 20px 0 8px; }
+  p { margin: 8px 0; }
+  .subtitle { color: #6c757d; font-size: 1.1em; margin-bottom: 32px; }
+  .version { color: #adb5bd; font-size: 0.9em; }
+  nav.toc {
+    background: #fff;
+    border: 1px solid #dee2e6;
+    border-radius: 8px;
+    padding: 20px 28px;
+    margin: 24px 0 40px;
+  }
+  nav.toc h2 { margin: 0 0 12px; border: none; font-size: 1.2em; }
+  nav.toc ol { padding-left: 24px; }
+  nav.toc li { margin: 6px 0; }
+  nav.toc a { color: #0d6efd; text-decoration: none; }
+  nav.toc a:hover { text-decoration: underline; }
+  .section { margin: 40px 0; }
+  .screenshot {
+    border: 1px solid #dee2e6;
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 16px 0 24px;
+    background: #fff;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  }
+  .screenshot img {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+  .screenshot-caption {
+    padding: 8px 16px;
+    background: #f8f9fa;
+    border-top: 1px solid #dee2e6;
+    font-size: 0.85em;
+    color: #6c757d;
+  }
+  ul { padding-left: 24px; margin: 8px 0; }
+  li { margin: 4px 0; }
+  .note {
+    background: #fff3cd;
+    border-left: 4px solid #ffc107;
+    padding: 12px 16px;
+    margin: 16px 0;
+    border-radius: 0 4px 4px 0;
+    font-size: 0.95em;
+  }
+  .tip {
+    background: #d1e7dd;
+    border-left: 4px solid #198754;
+    padding: 12px 16px;
+    margin: 16px 0;
+    border-radius: 0 4px 4px 0;
+    font-size: 0.95em;
+  }
+  .warn {
+    background: #f8d7da;
+    border-left: 4px solid #dc3545;
+    padding: 12px 16px;
+    margin: 16px 0;
+    border-radius: 0 4px 4px 0;
+    font-size: 0.95em;
+  }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+  th, td { border: 1px solid #dee2e6; padding: 8px 12px; text-align: left; }
+  th { background: #f8f9fa; font-weight: 600; }
+  code { background: #e9ecef; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }
+  .footer {
+    margin-top: 60px;
+    padding-top: 20px;
+    border-top: 1px solid #dee2e6;
+    color: #adb5bd;
+    font-size: 0.85em;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+
+<h1>telrad</h1>
+<p class="subtitle">User Manual — Tele-radiology Platform</p>
+<p class="version">Version 1.0 &middot; October 2026 &middot; pacs.caredeoghar.com</p>
+
+<nav class="toc">
+  <h2>Contents</h2>
+  <ol>
+    <li><a href="#login">Signing in</a></li>
+    <li><a href="#dashboard">Dashboard — Reader panel</a></li>
+    <li><a href="#worklist">My Cases — Worklist</a></li>
+    <li><a href="#reports">Reports — Signed and awaiting review</a></li>
+    <li><a href="#delivery">Delivery — Releasing reports to clinics</a></li>
+    <li><a href="#criticals">Criticals — Unacknowledged findings</a></li>
+    <li><a href="#notices">Notices — Unsent notifications</a></li>
+    <li><a href="#search">Search — Find any report</a></li>
+    <li><a href="#operations">Operations — Late board, orphans, performance</a></li>
+    <li><a href="#admin">Admin — Users, sites, tariffs, audit, billing</a></li>
+    <li><a href="#settings">Settings — Profile and tenant configuration</a></li>
+  </ol>
+</nav>
+
+<!-- 1. LOGIN -->
+<div class="section page-break" id="login">
+<h2>1. Signing in</h2>
+<p>Open <code>https://pacs.caredeoghar.com/</code> in your browser. You will see the login form.</p>
+
+<div class="screenshot">
+  <img src="01-login.png" alt="telrad login screen">
+  <div class="screenshot-caption">Figure 1 — Login form. Enter your email and passphrase, then click Sign in.</div>
+</div>
+
+<h3>Steps</h3>
+<ol>
+  <li>Enter your registered email address.</li>
+  <li>Enter your passphrase (minimum 14 characters).</li>
+  <li>Click <strong>Sign in</strong>.</li>
+</ol>
+
+<div class="note">
+  <strong>Two-factor authentication (2FA):</strong> If your account has 2FA enabled, you will be prompted for a 6-digit code from your authenticator app (Google Authenticator, Authy, etc.) or a backup code after entering your password.
+</div>
+
+<h3>Session</h3>
+<p>Sessions last 12 hours. If your session expires while the tab is open, the page returns to the login form. Your unsaved work on a report draft is preserved in the browser until you refresh.</p>
+</div>
+
+<!-- 2. DASHBOARD -->
+<div class="section page-break" id="dashboard">
+<h2>2. Dashboard — Reader panel</h2>
+<p>The Dashboard is the first page after login. It shows who is available to read cases right now.</p>
+
+<div class="screenshot">
+  <img src="02-dashboard.png" alt="telrad Dashboard with Reader panel">
+  <div class="screenshot-caption">Figure 2 — Dashboard. The Reader panel shows every clinician with a profile, their status, queue load, modalities, and roster window.</div>
+</div>
+
+<h3>What you see</h3>
+<ul>
+  <li><strong>Counts bar</strong> (top right): green = routable readers, amber = not routable (paused/away/at-cap), red = signed off.</li>
+  <li><strong>Reader panel table</strong>: one row per clinician who has a profile. Columns: name/grade, status (with colour dot), queue load (held / max), modalities and sub-specialties, roster window.</li>
+  <li><strong>Filters</strong>: search by name or sub-specialty, filter by modality, "routable only" checkbox.</li>
+</ul>
+
+<h3>For readers</h3>
+<p>If you are a radiologist or reviewer, your own status card appears above the panel. Use the buttons to declare your availability:</p>
+<ul>
+  <li><strong>Take cases</strong> — you are receiving offers.</li>
+  <li><strong>Pause</strong> — you stop receiving new offers but keep cases already held.</li>
+  <li><strong>Step away</strong> — same as pause, signals a longer break.</li>
+  <li><strong>Sign off panel</strong> — you are removed from routing entirely.</li>
+</ul>
+
+<div class="tip">
+  <strong>Tip:</strong> The panel refreshes every 5 seconds. If the "feed lost" banner appears, the colours may be stale — click Refresh.
+</div>
+</div>
+
+<!-- 3. WORKLIST -->
+<div class="section page-break" id="worklist">
+<h2>3. My Cases — Worklist</h2>
+<p>Visible to radiologists and reviewers. Shows every case currently held by you, including offers waiting for your accept/decline.</p>
+
+<h3>What you see</h3>
+<ul>
+  <li><strong>Offered cases</strong> — cases the dispatcher has offered to you. Each shows priority, modality, sub-specialty, accession, wait time, and a countdown until the offer lapses.</li>
+  <li><strong>Held cases</strong> — cases you have accepted. Shows when you accepted them and whether a draft report exists.</li>
+</ul>
+
+<h3>Actions</h3>
+<ul>
+  <li><strong>Accept</strong> — takes the case. It moves to your queue and the SLA clock starts.</li>
+  <li><strong>Decline</strong> — sends the case back to the pool. You must give a reason.</li>
+  <li><strong>Open</strong> — opens the DICOM viewer for that study.</li>
+  <li><strong>Share</strong> — opens WhatsApp with a link to the study.</li>
+  <li><strong>Bulk accept</strong> — when multiple offers are waiting, select checkboxes and accept them all at once.</li>
+</ul>
+
+<div class="note">
+  <strong>Offer expiry:</strong> If you do not accept or decline within the countdown, the offer lapses and rotates to the next eligible reader. Repeated lapses are audited.
+</div>
+</div>
+
+<!-- 4. REPORTS -->
+<div class="section page-break" id="reports">
+<h2>4. Reports — Signed and awaiting review</h2>
+<p>Two lists: reports you have signed (and their state), and reports signed by others that are awaiting your countersignature.</p>
+
+<h3>Awaiting a second name</h3>
+<p>Reports that have been signed by one radiologist and need a second name. Each row shows the accession, modality, version, author, and whether you are permitted to clear it. If you cannot clear it, the reason is shown (e.g. "you are the author").</p>
+
+<h3>Reports I signed</h3>
+<p>Your own signed reports. Each row shows the state (<code>signed</code>, <code>verified</code>, <code>delivered</code>), version, timestamp, and second name if applicable.</p>
+
+<h3>Actions</h3>
+<ul>
+  <li><strong>Review</strong> — opens the viewer to countersign.</li>
+  <li><strong>Open</strong> — opens the viewer without signing.</li>
+  <li><strong>Rate</strong> — rate a report on a 1–5 scale with an optional comment.</li>
+  <li><strong>Share</strong> — WhatsApp link.</li>
+</ul>
+</div>
+
+<!-- 5. DELIVERY -->
+<div class="section page-break" id="delivery">
+<h2>5. Delivery — Releasing reports to clinics</h2>
+<p>Visible to center desk staff, owners, and console operators. Shows every signed report that has not yet been released to the referring clinic.</p>
+
+<div class="screenshot">
+  <img src="03-delivery.png" alt="telrad Delivery page">
+  <div class="screenshot-caption">Figure 3 — Delivery page. Empty when no reports are awaiting release. Each row will show accession, modality, patient, state, and a Deliver button.</div>
+</div>
+
+<h3>What each row means</h3>
+<ul>
+  <li><strong>Deliver</strong> button — the report is ready. Clicking it releases the PDF to the clinic, records the SHA-256 hash, and moves the report to <code>delivered</code>.</li>
+  <li><strong>Amber status</strong> — the report cannot be released yet. The reason is shown: "awaiting a second name", "not signed yet", "already sent", or "a finding is unanswered".</li>
+  <li><strong>Action needed</strong> — flag a report for attention with a message. The flag stays until someone clears it.</li>
+  <li><strong>PDF</strong> — download the rendered report PDF.</li>
+  <li><strong>Open</strong> — open the viewer (operator roles only).</li>
+</ul>
+
+<div class="warn">
+  <strong>Critical findings gate:</strong> A report with an unacknowledged critical finding cannot be delivered. The finding must be marked as answered (with the name of the person who was telephoned) before the Deliver button appears.
+</div>
+</div>
+
+<!-- 6. CRITICALS -->
+<div class="section page-break" id="criticals">
+<h2>6. Criticals — Unacknowledged findings</h2>
+<p>Visible to desk staff and operators. Shows every critical finding that has been declared by a reader but not yet acknowledged by the referring clinic.</p>
+
+<div class="screenshot">
+  <img src="04-criticals.png" alt="telrad Criticals page">
+  <div class="screenshot-caption">Figure 4 — Criticals page. Empty when no critical findings are awaiting acknowledgement. Each row shows the finding, who declared it, when, and how long it has been waiting.</div>
+</div>
+
+<h3>Workflow</h3>
+<ol>
+  <li>A reader signs a report and declares a critical finding from a closed list (e.g. "acute intracranial haemorrhage").</li>
+  <li>The reader names the person they telephoned at the referring clinic.</li>
+  <li>The report is held in the critical queue until someone at the clinic acknowledges it.</li>
+  <li>If nobody acknowledges within the SLA window, the worker stamps a breach and the row turns red.</li>
+</ol>
+
+<div class="note">
+  <strong>Today "alert" means the board, not a phone call.</strong> The system records the acknowledgement; it does not place calls. The reader declares who they telephoned; the desk follows up if the acknowledgement does not arrive.
+</div>
+</div>
+
+<!-- 7. NOTICES -->
+<div class="section page-break" id="notices">
+<h2>7. Notices — Unsent notifications</h2>
+<p>Shows every notification that has been queued but not yet delivered to a referring clinic. Includes email notices for report delivery and critical findings.</p>
+
+<div class="screenshot">
+  <img src="05-notices.png" alt="telrad Notices page">
+  <div class="screenshot-caption">Figure 5 — Notices page. Shows unsent notifications with their channel (email), recipient, attempt number, and next retry time. "Dead" rows have given up after exhausting retries.</div>
+</div>
+
+<h3>Status colours</h3>
+<ul>
+  <li><strong>Green</strong> — pending, will retry at the scheduled time.</li>
+  <li><strong>Amber</strong> — failed, will retry with backoff.</li>
+  <li><strong>Red (dead)</strong> — exhausted all retries. A person must intervene.</li>
+</ul>
+
+<div class="tip">
+  <strong>Tip:</strong> A "dead" notice usually means the recipient email address is wrong. Fix the address in the tenant settings and the notice can be retried manually.
+</div>
+</div>
+
+<!-- 8. SEARCH -->
+<div class="section page-break" id="search">
+<h2>8. Search — Find any report</h2>
+<p>Available to all roles. Search across all reports you have permission to see by patient name, accession number, or findings text.</p>
+
+<div class="screenshot">
+  <img src="06-search.png" alt="telrad Search page">
+  <div class="screenshot-caption">Figure 6 — Search page. Type a patient name, accession, or finding to search. Results appear below the search box.</div>
+</div>
+
+<h3>Search tips</h3>
+<ul>
+  <li>Search is case-insensitive.</li>
+  <li>Partial matches work: "kumar" finds "Ramesh Kumar".</li>
+  <li>Accession numbers can be searched without the full string.</li>
+  <li>Findings text is searched across all versions of the report.</li>
+  <li>Center-scoped users only see their own tenant's reports.</li>
+</ul>
+</div>
+
+<!-- 9. OPERATIONS -->
+<div class="section page-break" id="operations">
+<h2>9. Operations — Late board, orphans, performance</h2>
+<p>Visible to owners and console operators. The operator's working board: what is running out, what cannot be routed, and how the system is performing.</p>
+
+<div class="screenshot">
+  <img src="07-operations.png" alt="telrad Operations page">
+  <div class="screenshot-caption">Figure 7 — Operations page. Shows the Waiting board (late cases, second-name queue, unrouteable cases), Orphan studies, Reader performance, Turn-around targets, and Film exports.</div>
+</div>
+
+<h3>Waiting board</h3>
+<p>Three sub-sections:</p>
+<ul>
+  <li><strong>Late cases</strong> — cases past their SLA deadline. Shows how overdue, who holds them, and the escalation stage. Click <strong>Open</strong> to view the study.</li>
+  <li><strong>Awaiting second name</strong> — signed reports waiting for countersignature. Shows author and wait time.</li>
+  <li><strong>Cannot route automatically</strong> — cases with no eligible reader. Select cases and assign them manually to a named radiologist.</li>
+</ul>
+
+<h3>Orphan studies</h3>
+<p>Studies that arrived but could not be matched to an order or patient. Each orphan shows candidate orders it might link to. Use <strong>Link</strong> to attach it to the correct order, or <strong>Unlink</strong> to detach it.</p>
+
+<h3>Reader performance</h3>
+<p>Date-range report of who accepted, who completed, and how long each read took. Set a date range and click <strong>Apply</strong>.</p>
+
+<h3>Turn-around targets</h3>
+<p>Set SLA targets per modality and priority. Changing a target moves the live deadlines for cases that have not yet breached.</p>
+
+<h3>Film exports</h3>
+<p>Record a film/disc export against a study. Each export becomes a line item on the next invoice for that tenant.</p>
+</div>
+
+<!-- 10. ADMIN -->
+<div class="section page-break" id="admin">
+<h2>10. Admin — Users, sites, tariffs, audit, billing</h2>
+<p>Configuration pages for owners and console operators. Each card is independent.</p>
+
+<div class="screenshot">
+  <img src="08-admin.png" alt="telrad Admin page">
+  <div class="screenshot-caption">Figure 8 — Admin page. Users, Imaging sites, Tariffs, Image retention, Audit trail, and Billing cards.</div>
+</div>
+
+<h3>Users</h3>
+<p>Create and manage user accounts. Each user has a role: <code>owner</code>, <code>console</code>, <code>center_staff</code>, <code>radiologist</code>, or <code>reviewer</code>. Radiologists and reviewers need a clinician profile (council registration, grade, modalities, sub-specialties, max queue, night charge).</p>
+<ul>
+  <li><strong>Add user</strong> — creates an account with a temporary password shown once.</li>
+  <li><strong>Status dropdown</strong> — change between active, suspended, and disabled.</li>
+  <li><strong>Reset password</strong> — generates a new temporary password shown once.</li>
+</ul>
+
+<h3>Imaging sites</h3>
+<p>Centers that send studies. Each site has an AE Title for DICOM routing and an optional CIDR allowlist. Manage tokens for the upload agent.</p>
+
+<h3>Tariffs</h3>
+<p>Price per study by modality and priority. Night multipliers apply automatically. The tariff in force on the delivery day is used for billing.</p>
+
+<h3>Image retention</h3>
+<p>Per-tenant pixel retention in days. NULL keeps images forever. The sweep purges pixels only — reports, billing, and audit records are never deleted. A pinned study is never swept.</p>
+
+<h3>Audit trail</h3>
+<p>Every mutation is recorded: who, when, what changed, before and after values. The chain is hash-linked so tampering is detectable. Export as CSV.</p>
+
+<h3>Billing</h3>
+<p>Preview billable events, create draft invoices, issue them, and export as CSV. Invoices are numbered in an unbroken financial-year sequence per tenant.</p>
+</div>
+
+<!-- 11. SETTINGS -->
+<div class="section page-break" id="settings">
+<h2>11. Settings — Profile and tenant configuration</h2>
+<p>Available to all roles. Two sections: your own profile, and (for owners) the tenant's configuration.</p>
+
+<div class="screenshot">
+  <img src="09-settings.png" alt="telrad Settings page">
+  <div class="screenshot-caption">Figure 9 — Settings page. My profile with password change, and Tenant settings with legal identity, contact, reports signature line, and locale.</div>
+</div>
+
+<h3>My profile</h3>
+<ul>
+  <li><strong>Name</strong> and <strong>Role</strong> — shown for reference, not editable here.</li>
+  <li><strong>Change password</strong> — enter your current password, then a new one (minimum 14 characters), confirm it, and click Change password.</li>
+</ul>
+
+<h3>Tenant settings (owners only)</h3>
+<ul>
+  <li><strong>Legal identity</strong> — legal name, billing name, country, state code, GSTIN.</li>
+  <li><strong>Contact</strong> — contact name, email, phone.</li>
+  <li><strong>Reports</strong> — signature line that appears on every signed report PDF.</li>
+  <li><strong>Locale</strong> — timezone (affects night-charge calculations and SLA clocks).</li>
+</ul>
+
+<div class="note">
+  <strong>Every change is audited.</strong> The before and after values are recorded in the audit trail with your user ID and timestamp.
+</div>
+</div>
+
+<div class="footer">
+  telrad User Manual &middot; pacs.caredeoghar.com &middot; October 2026
+</div>
+
+</body>
+</html>
