@@ -1098,6 +1098,7 @@ export default function App() {
           {navItems.map((item) => (
             <div
               key={item.id}
+              data-nav={item.id}
               className={`sidebar-nav-item ${nav === item.id ? 'active' : ''}`}
               onClick={() => setNav(item.id)}
             >
