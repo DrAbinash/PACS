@@ -1,0 +1,5 @@
+dist/
+dist-exe/
+dist-distribution/
+*.zip
+telrad-agent-state.json
