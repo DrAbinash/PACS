@@ -29,6 +29,7 @@ import { slaRouter } from './routes/sla.js';
 import { tenantsRouter } from './routes/tenants.js';
 import { totpRouter } from './routes/totp.js';
 import { uploadsRouter } from './routes/uploads.js';
+import { usersRouter } from './routes/users.js';
 import { viewRouter } from './routes/view.js';
 import { worklistRouter } from './routes/worklist.js';
 import { metricsRouter } from './metrics.js';
@@ -420,6 +421,7 @@ export function createApp(deps: AppDeps): Express {
   app.use('/v1', performanceRouter(db));
   app.use('/v1', slaRouter(db));
   app.use('/v1', tenantsRouter(db));
+  app.use('/v1', usersRouter(db));
   app.use('/v1', totpRouter(db, secureCookies));
   app.use(metricsRouter(db));
 

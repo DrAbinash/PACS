@@ -705,6 +705,22 @@ export const api = {
     call<{ ok: boolean; order: Order }>('/v1/orders', { method: 'POST', body: JSON.stringify(input) }),
   updateOrder: (id: number, fields: { priority?: string; status?: string; clinicalIndication?: string; referringEmail?: string }) =>
     call<{ ok: boolean; order: Order }>(`/v1/orders/${id}`, { method: 'PATCH', body: JSON.stringify(fields) }),
+
+  // Users: operator-managed humans on the platform.
+  users: () =>
+    call<{ ok: boolean; users: UserRecord[] }>('/v1/users'),
+  createUser: (input: CreateUserInput) =>
+    call<{ ok: boolean; user: UserRecord; tempPassword: string }>('/v1/users', {
+      method: 'POST', body: JSON.stringify(input),
+    }),
+  updateUser: (id: number, fields: UpdateUserInput) =>
+    call<{ ok: boolean; user: UserRecord }>(`/v1/users/${id}`, {
+      method: 'PATCH', body: JSON.stringify(fields),
+    }),
+  resetUserPassword: (id: number) =>
+    call<{ ok: boolean; tempPassword: string }>(`/v1/users/${id}/reset-password`, {
+      method: 'POST', body: '{}',
+    }),
 };
 
 export type ReaderPerf = {
@@ -863,6 +879,58 @@ export type Order = {
   studyId: number | null;
   createdAt: string;
   updatedAt: string;
+};
+
+export type ClinicianProfile = {
+  userId: number;
+  registrationCouncil: string;
+  registrationNumber: string;
+  stateCodes: string[];
+  grade: 'junior' | 'senior' | 'chief';
+  subspecialtyCodes: string[];
+  modalityCodes: string[];
+  maxQueueSize: number;
+  acceptsNight: boolean;
+  reportLanguage: string;
+};
+
+export type UserRecord = {
+  id: number;
+  email: string;
+  displayName: string;
+  role: 'owner' | 'console' | 'center_staff' | 'radiologist' | 'reviewer' | 'typist';
+  tenantId: number | null;
+  status: 'invited' | 'active' | 'locked' | 'disabled';
+  failedAttempts: number;
+  lockedUntil: string | null;
+  lastLoginAt: string | null;
+  totpEnabled: boolean;
+  createdAt: string | null;
+  clinician: ClinicianProfile | null;
+};
+
+export type CreateUserInput = {
+  email: string;
+  displayName: string;
+  role: 'owner' | 'console' | 'center_staff' | 'radiologist' | 'reviewer' | 'typist';
+  tenantId?: number | null;
+  clinician?: {
+    registrationCouncil: string;
+    registrationNumber: string;
+    stateCodes?: string[] | string;
+    grade?: 'junior' | 'senior' | 'chief';
+    subspecialtyCodes?: string[] | string;
+    modalityCodes?: string[] | string;
+    maxQueueSize?: number;
+    acceptsNight?: boolean;
+  };
+};
+
+export type UpdateUserInput = {
+  displayName?: string;
+  role?: 'owner' | 'console' | 'center_staff' | 'radiologist' | 'reviewer' | 'typist';
+  status?: 'invited' | 'active' | 'locked' | 'disabled';
+  tenantId?: number | null;
 };
 
 async function frame(studyId: number, pk: string, index: number): Promise<FrameBytes> {

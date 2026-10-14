@@ -27,6 +27,7 @@ import { SearchReports } from './SearchReports';
 import { Sites } from './Sites';
 import { Orphans } from './Orphans';
 import { Tariffs } from './Tariffs';
+import { Users } from './Users';
 import { explainCode, retryLabel } from './Report';
 
 const HEARTBEAT_MS = 20_000;
@@ -1261,6 +1262,7 @@ export default function App() {
           {/* Admin: configuration */}
           {nav === 'admin' && isOperator && (
             <>
+              <Users show />
               <Sites show />
               <Tariffs show tenantId={session.user.tenantId} />
               <Retention show canEdit={session.user.role === 'owner'} />
