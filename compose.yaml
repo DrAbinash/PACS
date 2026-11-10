@@ -24,6 +24,14 @@ services:
     image: postgres:16-alpine
     container_name: tr-db
     <<: *runtime
+    # Memory ceilings (limits, not reservations) so a night job — the worker tick,
+    # retention purge, or a scheduled backup/restore — cannot exhaust the NAS RAM
+    # and tip it into the swap/iowait spiral seen 2026-11-11 (load 527). Sized well
+    # above normal RSS; tune in Container Manager if a service ever OOMs.
+    deploy:
+      resources:
+        limits:
+          memory: 1g
     profiles: ["nas", "cloud"]
     environment:
       POSTGRES_DB: ${TR_DB_NAME}
@@ -54,6 +62,10 @@ services:
     image: orthancteam/orthanc@${ORTHANC_IMAGE_DIGEST}
     container_name: tr-orthanc
     <<: *runtime
+    deploy:
+      resources:
+        limits:
+          memory: 1g
     profiles: ["nas", "cloud"]
     environment:
       # Verified against a running 1.13.0: with HTTP authentication enabled and no
@@ -92,6 +104,10 @@ services:
     image: telrad/api:${TR_RELEASE:-dev}
     container_name: tr-api
     <<: *runtime
+    deploy:
+      resources:
+        limits:
+          memory: 1g
     profiles: ["nas", "cloud"]
     environment:
       TR_DB_URL: postgresql://${TR_DB_USER}:${TR_DB_PASSWORD}@tr-db:5432/${TR_DB_NAME}
@@ -134,6 +150,10 @@ services:
     image: telrad/worker:${TR_RELEASE:-dev}
     container_name: tr-worker
     <<: *runtime
+    deploy:
+      resources:
+        limits:
+          memory: 1g
     profiles: ["nas", "cloud"]
     # Full CMD, not just the mode: a partial override replaces the image CMD
     # entirely, and the node base image's entrypoint turns a bare `run` into
@@ -181,6 +201,10 @@ services:
     image: caddy:2-alpine
     container_name: tr-caddy
     <<: *runtime
+    deploy:
+      resources:
+        limits:
+          memory: 256m
     profiles: ["nas", "cloud"]
     command:
       - caddy
@@ -226,6 +250,10 @@ services:
     image: cloudflare/cloudflared@${CLOUDFLARED_IMAGE_DIGEST}
     container_name: tr-tunnel
     <<: *runtime
+    deploy:
+      resources:
+        limits:
+          memory: 256m
     # Its own profile, not nas: with an empty token cloudflared exits and
     # restart-loops forever. The service exists only when the operator opts in
     # with `--profile tunnel`, which is the point where a token is also required.
@@ -250,6 +278,10 @@ services:
     image: lscr.io/linuxserver/duplicati:latest
     container_name: tr-duplicati
     <<: *runtime
+    deploy:
+      resources:
+        limits:
+          memory: 1536m
     profiles: ["backup"]
     environment:
       # The GUI can read every backup and configure any destination, so an
