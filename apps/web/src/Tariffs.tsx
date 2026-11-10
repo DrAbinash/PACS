@@ -1,10 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, ApiError, type Tariff } from './api';
 
-function formatRupees(paise: number): string {
-  return `₹${(paise / 100).toFixed(2)}`;
-}
-
 export function Tariffs({ show, tenantId }: { show: boolean; tenantId: number | null }) {
   const [tariffs, setTariffs] = useState<Tariff[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -52,19 +48,6 @@ export function Tariffs({ show, tenantId }: { show: boolean; tenantId: number | 
       await load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'cannot create tariff');
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const activate = async (id: number) => {
-    setBusy(id);
-    setError(null);
-    try {
-      await api.activateTariff(id);
-      await load();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'cannot activate tariff');
     } finally {
       setBusy(null);
     }
