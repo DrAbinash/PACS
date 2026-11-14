@@ -64,7 +64,7 @@ export function usersRouter(db: Db): Router {
       return res.status(422).json({ ok: false, error: 'email, displayName and a valid role are required' });
     }
 
-    let tenantId: number | null = body.tenantId === undefined || body.tenantId === null
+    const tenantId: number | null = body.tenantId === undefined || body.tenantId === null
       ? null
       : Number(body.tenantId);
     if (tenantId !== null && !Number.isInteger(tenantId)) {

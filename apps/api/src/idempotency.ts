@@ -8,7 +8,7 @@ export async function checkIdempotency(
   db: Db,
   key: string | null,
   route: string,
-  entityId: number,
+  _entityId: number,
 ): Promise<{ status: number; body: unknown } | null> {
   if (!key) return null;
   const [row] = await db.select({

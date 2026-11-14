@@ -15,7 +15,7 @@ import { opsDigestOnce } from './ops.js';
 import { createSmtpTransport } from './smtp.js';
 import { createWhatsAppTransport } from './whatsapp.js';
 import { createCriticalStore, createDispatchStore, createEscalationStore, createInboxStore, createNotifyStore, createOpsStore, createStore } from './store.js';
-import { logger, childLogger } from './logger.js';
+import { logger } from './logger.js';
 
 function env(name: string): string {
   const v = process.env[name];
